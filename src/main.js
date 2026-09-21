@@ -1,0 +1,764 @@
+import { downloadBlob, encodeWavetableWav, WAVETABLE_FRAME_SAMPLES } from "./audio/wav.js";
+import { WavetableInstrument } from "./audio/wavetable-synth.js";
+import { loadTerrainGrid } from "./data/terrain-tiles.js";
+import { WorldMap } from "./map/world-map.js";
+import { createFoundationTerrain, FOUNDATION_SEED } from "./model/terrain.js";
+import { createPatch, parsePatch } from "./model/patch.js";
+import {
+  buildTerrainWavetable,
+  buildWavetableFrames,
+  midiNoteFrequency,
+  terrainProfileBank,
+} from "./model/wavetable.js";
+import { drawTerrain, drawWavetable } from "./visual/canvas.js";
+
+const DEFAULT_SELECTION = {
+  west: -61.75,
+  south: 15.96,
+  east: -61.56,
+  north: 16.16,
+};
+const DEFAULT_VIEW = { center: { longitude: -61.45, latitude: 16.2 }, zoom: 9 };
+const EARTH_RADIUS_METERS = 6_371_008.8;
+const ANALYSIS_GRID_SIZE = 256;
+const AUDIO_SAMPLE_RATE = 44_100;
+const MAX_BANK_POSITION = 1;
+const SCAN_UPDATE_INTERVAL_MS = 16;
+const MINIMUM_SCAN_GLIDE = 0.015;
+const MINIMUM_HARMONICS = 2;
+const MAXIMUM_HARMONICS = 256;
+const EXPORT_FRAME_COUNT = 256;
+const KEYBOARD_NOTES = new Map([
+  ["KeyA", 60], ["KeyW", 61], ["KeyS", 62], ["KeyE", 63],
+  ["KeyD", 64], ["KeyF", 65], ["KeyT", 66], ["KeyG", 67],
+  ["KeyY", 68], ["KeyH", 69], ["KeyU", 70], ["KeyJ", 71], ["KeyK", 72],
+]);
+const MIN_OCTAVE_OFFSET = -3;
+const MAX_OCTAVE_OFFSET = 3;
+
+const root = document.querySelector("#app");
+if (!root) throw new Error("Application root is missing");
+
+root.innerHTML = `
+  <main class="shell">
+    <section class="workspace">
+      <figure class="panel map-panel">
+        <div class="map-toolbar" aria-label="Map tools">
+          <div class="tool-group">
+            <span class="wordmark"><span class="prompt">&gt;</span> GEOFLUTE</span>
+            <button class="tool" id="new-area" type="button" aria-pressed="false">NEW AREA</button>
+          </div>
+          <div class="tool-group">
+            <button class="tool is-active" type="button" data-base-layer="relief">RELIEF</button>
+            <button class="tool" type="button" data-base-layer="map">MAP</button>
+            <button class="tool" id="view-world" type="button">WORLD</button>
+            <button class="tool square" id="zoom-out" type="button" aria-label="Zoom out">−</button>
+            <button class="tool square" id="zoom-in" type="button" aria-label="Zoom in">+</button>
+            <button class="tool square" id="info-toggle" type="button" aria-label="Show source information" aria-pressed="false">i</button>
+          </div>
+        </div>
+        <div class="map-stage">
+          <div
+            id="world-map"
+            class="world-map"
+            role="application"
+            aria-label="Map. Use arrow keys to pan and plus or minus to zoom."
+          ></div>
+          <span id="area-readout" class="map-overlay map-overlay-left">-- × -- KM</span>
+          <span id="data-status" class="map-overlay map-overlay-right" aria-live="polite">DEM …</span>
+        </div>
+        <div id="info-panel" class="info-panel" hidden>
+          <dl>
+            <div><dt>PROVENANCE</dt><dd>SIMULATED</dd></div>
+            <div><dt>MAPPING</dt><dd>DIRECT TERRAIN PROFILE</dd></div>
+            <div><dt>BOUNDS</dt><dd id="bounds-readout">--</dd></div>
+            <div><dt>TERRAIN</dt><dd id="terrain-provider">LOADING</dd></div>
+            <div><dt>DEM RESOLUTION</dt><dd id="dem-resolution">--</dd></div>
+            <div><dt>DEM SOURCE</dt><dd id="dem-source">--</dd></div>
+            <div><dt>SEED</dt><dd id="seed-readout">--</dd></div>
+          </dl>
+          <p id="map-attribution" class="info-attribution">MAP DATA © <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener noreferrer">OPENSTREETMAP CONTRIBUTORS</a>, SRTM / STYLE © <a href="https://opentopomap.org/" target="_blank" rel="noopener noreferrer">OPENTOPOMAP</a> (CC-BY-SA)</p>
+          <p class="info-attribution">
+            TERRAIN: <a href="https://registry.opendata.aws/terrain-tiles/" target="_blank" rel="noopener noreferrer">MAPZEN TERRAIN TILES / AWS OPEN DATA</a>
+            · <a href="https://github.com/tilezen/joerd/blob/master/docs/attribution.md" target="_blank" rel="noopener noreferrer">FULL SOURCE CREDITS</a>
+          </p>
+        </div>
+      </figure>
+
+      <aside class="controls" aria-label="Instrument">
+        <section class="panel module">
+          <h2>CYCLE</h2>
+          <label for="slice-direction">DIRECTION <output id="slice-direction-value">090 DEG</output></label>
+          <input id="slice-direction" type="range" min="0" max="359" step="1" value="90" />
+          <label for="bank-position">POSITION <output id="bank-position-value">0.00</output></label>
+          <input id="bank-position" type="range" min="-1" max="1" step="0.01" value="0" />
+          <label for="harmonics">HARMONICS <output id="harmonics-value">64</output></label>
+          <input id="harmonics" type="range" min="0" max="1" step="0.001" value="0.714" />
+          <div class="toggle-row">
+            <button class="tool" id="mirror" type="button" aria-pressed="false">MIRROR</button>
+            <button class="tool is-active" id="normalize" type="button" aria-pressed="true">NORM</button>
+          </div>
+        </section>
+
+        <section class="panel module">
+          <h2><span>SCAN</span><button class="tool" id="scan-toggle" type="button" aria-pressed="false">OFF</button></h2>
+          <label for="scan-rate">RATE <output id="scan-rate-value">0.20 HZ</output></label>
+          <input id="scan-rate" type="range" min="0.02" max="2" step="0.01" value="0.2" />
+          <label for="scan-depth">DEPTH <output id="scan-depth-value">1.00</output></label>
+          <input id="scan-depth" type="range" min="0" max="1" step="0.01" value="1" />
+          <label for="scan-smooth">SMOOTH <output id="scan-smooth-value">0.30</output></label>
+          <input id="scan-smooth" type="range" min="0" max="1" step="0.01" value="0.3" />
+        </section>
+
+        <section class="panel module play-module">
+          <h2><span>PLAY</span><small>OCT <output id="octave-value">4</output> · Z/X</small></h2>
+          <label for="attack">ATTACK <output id="attack-value">0.020 S</output></label>
+          <input id="attack" type="range" min="0.003" max="1" step="0.001" value="0.02" />
+          <label for="release">RELEASE <output id="release-value">0.300 S</output></label>
+          <input id="release" type="range" min="0.02" max="2" step="0.01" value="0.3" />
+          <div class="note-keyboard" aria-label="Keyboard">
+            <div class="white-keys">
+              <button type="button" data-midi="60" aria-label="C, keyboard A">C4<small>A</small></button>
+              <button type="button" data-midi="62" aria-label="D, keyboard S">D<small>S</small></button>
+              <button type="button" data-midi="64" aria-label="E, keyboard D">E<small>D</small></button>
+              <button type="button" data-midi="65" aria-label="F, keyboard F">F<small>F</small></button>
+              <button type="button" data-midi="67" aria-label="G, keyboard G">G<small>G</small></button>
+              <button type="button" data-midi="69" aria-label="A, keyboard H">A<small>H</small></button>
+              <button type="button" data-midi="71" aria-label="B, keyboard J">B<small>J</small></button>
+              <button type="button" data-midi="72" aria-label="C, keyboard K">C5<small>K</small></button>
+            </div>
+            <div class="black-keys">
+              <button type="button" data-midi="61" style="--slot: 0" aria-label="C sharp, keyboard W"><small>W</small></button>
+              <button type="button" data-midi="63" style="--slot: 1" aria-label="D sharp, keyboard E"><small>E</small></button>
+              <button type="button" data-midi="66" style="--slot: 3" aria-label="F sharp, keyboard T"><small>T</small></button>
+              <button type="button" data-midi="68" style="--slot: 4" aria-label="G sharp, keyboard Y"><small>Y</small></button>
+              <button type="button" data-midi="70" style="--slot: 5" aria-label="A sharp, keyboard U"><small>U</small></button>
+            </div>
+          </div>
+        </section>
+
+        <section class="panel module">
+          <h2><span>OUTPUT</span><button class="tool" id="frame-size" type="button">1024</button></h2>
+          <div class="transport">
+            <button id="play" class="primary-action" type="button" disabled>PREVIEW C4</button>
+            <button id="hold" class="tool" type="button" aria-pressed="false" disabled>HOLD</button>
+            <button id="stop" class="tool" type="button">STOP</button>
+          </div>
+          <div class="export-row">
+            <button id="download-wav" class="tool" type="button" disabled>WAV</button>
+            <button id="export-patch" class="tool" type="button">SAVE</button>
+            <button id="import-patch" class="tool" type="button">LOAD</button>
+            <input id="patch-file" class="sr-only" type="file" accept=".json,application/json" />
+          </div>
+          <div id="audio-status" class="audio-status" aria-live="polite">…</div>
+        </section>
+      </aside>
+
+      <div class="visual-grid">
+        <figure class="panel visual-panel">
+          <figcaption>TERRAIN</figcaption>
+          <canvas id="terrain" aria-label="Terrain height grid and active transect"></canvas>
+          <div class="readout"><span id="terrain-range">--</span></div>
+        </figure>
+
+        <figure class="panel visual-panel">
+          <figcaption>WAVETABLE</figcaption>
+          <canvas id="wavetable" aria-label="Elevation profile and derived wavetable cycle"></canvas>
+          <div class="readout"><span id="transect-length">--</span><span id="profile-range">--</span></div>
+        </figure>
+      </div>
+    </section>
+  </main>
+`;
+
+function requiredElement(selector, constructor) {
+  const element = document.querySelector(selector);
+  if (!(element instanceof constructor)) throw new Error(`Required element is missing or invalid: ${selector}`);
+  return element;
+}
+
+function clamp(value, minimum, maximum) {
+  return Math.min(maximum, Math.max(minimum, value));
+}
+
+function areaDimensions(bounds) {
+  const middleLatitudeRadians = ((bounds.north + bounds.south) * Math.PI) / 360;
+  const width = EARTH_RADIUS_METERS * Math.cos(middleLatitudeRadians) * ((bounds.east - bounds.west) * Math.PI) / 180;
+  const height = EARTH_RADIUS_METERS * ((bounds.north - bounds.south) * Math.PI) / 180;
+  return { widthMeters: Math.abs(width), heightMeters: Math.abs(height) };
+}
+
+function seedFromBounds(bounds) {
+  const text = [bounds.west, bounds.south, bounds.east, bounds.north].map((value) => value.toFixed(5)).join(":");
+  let hash = FOUNDATION_SEED;
+  for (let index = 0; index < text.length; index += 1) {
+    hash ^= text.charCodeAt(index);
+    hash = Math.imul(hash, 16_777_619);
+  }
+  return hash >>> 0;
+}
+
+const elements = {
+  terrainCanvas: requiredElement("#terrain", HTMLCanvasElement),
+  wavetableCanvas: requiredElement("#wavetable", HTMLCanvasElement),
+  map: requiredElement("#world-map", HTMLElement),
+  sliceDirection: requiredElement("#slice-direction", HTMLInputElement),
+  bankPosition: requiredElement("#bank-position", HTMLInputElement),
+  harmonics: requiredElement("#harmonics", HTMLInputElement),
+  mirror: requiredElement("#mirror", HTMLButtonElement),
+  normalize: requiredElement("#normalize", HTMLButtonElement),
+  newArea: requiredElement("#new-area", HTMLButtonElement),
+  scanToggle: requiredElement("#scan-toggle", HTMLButtonElement),
+  scanRate: requiredElement("#scan-rate", HTMLInputElement),
+  scanDepth: requiredElement("#scan-depth", HTMLInputElement),
+  scanSmooth: requiredElement("#scan-smooth", HTMLInputElement),
+  attack: requiredElement("#attack", HTMLInputElement),
+  release: requiredElement("#release", HTMLInputElement),
+  play: requiredElement("#play", HTMLButtonElement),
+  hold: requiredElement("#hold", HTMLButtonElement),
+  stop: requiredElement("#stop", HTMLButtonElement),
+  downloadWav: requiredElement("#download-wav", HTMLButtonElement),
+  exportPatch: requiredElement("#export-patch", HTMLButtonElement),
+  importPatch: requiredElement("#import-patch", HTMLButtonElement),
+  frameSize: requiredElement("#frame-size", HTMLButtonElement),
+  patchFile: requiredElement("#patch-file", HTMLInputElement),
+  sliceDirectionValue: requiredElement("#slice-direction-value", HTMLOutputElement),
+  bankPositionValue: requiredElement("#bank-position-value", HTMLOutputElement),
+  harmonicsValue: requiredElement("#harmonics-value", HTMLOutputElement),
+  scanRateValue: requiredElement("#scan-rate-value", HTMLOutputElement),
+  scanDepthValue: requiredElement("#scan-depth-value", HTMLOutputElement),
+  scanSmoothValue: requiredElement("#scan-smooth-value", HTMLOutputElement),
+  attackValue: requiredElement("#attack-value", HTMLOutputElement),
+  releaseValue: requiredElement("#release-value", HTMLOutputElement),
+  octaveValue: requiredElement("#octave-value", HTMLOutputElement),
+  transectLength: requiredElement("#transect-length", HTMLElement),
+  profileRange: requiredElement("#profile-range", HTMLElement),
+  terrainRange: requiredElement("#terrain-range", HTMLElement),
+  areaReadout: requiredElement("#area-readout", HTMLElement),
+  boundsReadout: requiredElement("#bounds-readout", HTMLElement),
+  terrainProvider: requiredElement("#terrain-provider", HTMLElement),
+  demResolution: requiredElement("#dem-resolution", HTMLElement),
+  demSource: requiredElement("#dem-source", HTMLElement),
+  seedReadout: requiredElement("#seed-readout", HTMLElement),
+  audioStatus: requiredElement("#audio-status", HTMLElement),
+  dataStatus: requiredElement("#data-status", HTMLElement),
+  mapAttribution: requiredElement("#map-attribution", HTMLElement),
+  infoToggle: requiredElement("#info-toggle", HTMLButtonElement),
+  infoPanel: requiredElement("#info-panel", HTMLElement),
+};
+
+let selection = { ...DEFAULT_SELECTION };
+let terrain;
+let wavetable;
+let currentSeed = FOUNDATION_SEED;
+let terrainRequest = null;
+let terrainLoading = true;
+let previewTimer = null;
+let octaveOffset = 0;
+let profileBank = null;
+let bankTerrain = null;
+let bankBearingDeg = null;
+let scanSmoothing = null;
+let scanning = false;
+let scanStartTime = 0;
+const wavetableInstrument = new WavetableInstrument();
+const scanClock = new Worker(URL.createObjectURL(new Blob([
+  "let timer=null;onmessage=(event)=>{clearInterval(timer);timer=event.data>0?setInterval(()=>postMessage(0),event.data):null;};",
+], { type: "text/javascript" })));
+scanClock.onmessage = () => updateWavetable();
+
+const worldMap = new WorldMap(elements.map, {
+  center: DEFAULT_VIEW.center,
+  zoom: DEFAULT_VIEW.zoom,
+  selection,
+  onSelection(bounds) {
+    selection = bounds;
+    rebuildGeometry();
+  },
+  onDrawArmedChange(armed) {
+    setPressed(elements.newArea, armed);
+  },
+});
+
+function isPressed(button) {
+  return button.getAttribute("aria-pressed") === "true";
+}
+
+function setPressed(button, pressed) {
+  button.setAttribute("aria-pressed", String(pressed));
+  button.classList.toggle("is-active", pressed);
+}
+
+function scanPosition() {
+  const center = Number(elements.bankPosition.value);
+  if (!scanning) return center;
+  const seconds = (performance.now() - scanStartTime) / 1_000;
+  const phase = 2 * Math.PI * Number(elements.scanRate.value) * seconds;
+  const reach = Number(elements.scanDepth.value) * (MAX_BANK_POSITION - Math.abs(center));
+  return center + Math.sin(phase) * reach;
+}
+
+function currentWavetableParameters() {
+  return {
+    bearingDeg: Number(elements.sliceDirection.value),
+    position: clamp(scanPosition(), -MAX_BANK_POSITION, MAX_BANK_POSITION),
+    harmonicLimit: harmonicLimitFromSlider(Number(elements.harmonics.value)),
+    seamMethod: isPressed(elements.mirror) ? "forward-reverse-mirror" : "direct-profile",
+    normalize: isPressed(elements.normalize),
+  };
+}
+
+function currentEnvelope() {
+  return { attackSeconds: Number(elements.attack.value), releaseSeconds: Number(elements.release.value) };
+}
+
+function transectToGeographic(transect) {
+  const center = {
+    longitude: (selection.west + selection.east) / 2,
+    latitude: (selection.south + selection.north) / 2,
+  };
+  const dimensions = areaDimensions(selection);
+  const convert = (point) => ({
+    longitude: center.longitude + (point.eastMeters / dimensions.widthMeters) * (selection.east - selection.west),
+    latitude: center.latitude + (point.northMeters / dimensions.heightMeters) * (selection.north - selection.south),
+  });
+  return { start: convert(transect.start), end: convert(transect.end) };
+}
+
+function setDataStatus(state, text) {
+  elements.dataStatus.classList.remove("is-ready", "is-error");
+  if (state) elements.dataStatus.classList.add(state);
+  elements.dataStatus.textContent = text;
+}
+
+function updateAreaReadouts() {
+  const dimensions = areaDimensions(selection);
+  elements.areaReadout.textContent = `${(dimensions.widthMeters / 1_000).toFixed(1)} × ${(dimensions.heightMeters / 1_000).toFixed(1)} KM`;
+  elements.boundsReadout.textContent = `${selection.west.toFixed(3)}, ${selection.south.toFixed(3)} / ${selection.east.toFixed(3)}, ${selection.north.toFixed(3)}`;
+  elements.seedReadout.textContent = `0x${currentSeed.toString(16).toUpperCase().padStart(8, "0")}`;
+}
+
+function updateTransportAvailability() {
+  elements.play.disabled = terrainLoading || !terrain;
+  elements.hold.disabled = terrainLoading || !terrain;
+  elements.downloadWav.disabled = !wavetable;
+}
+
+const TEXT_ENTRY_TYPES = new Set(["text", "search", "url", "email", "password", "number", "tel"]);
+
+function isTypingTarget(target) {
+  if (target instanceof HTMLTextAreaElement || target instanceof HTMLSelectElement) return true;
+  if (target instanceof HTMLElement && target.isContentEditable) return true;
+  return target instanceof HTMLInputElement && TEXT_ENTRY_TYPES.has(target.type);
+}
+
+function noteButton(baseMidiNote) {
+  return document.querySelector(`[data-midi="${baseMidiNote}"]`);
+}
+
+function harmonicLimitFromSlider(value) {
+  return Math.round(MINIMUM_HARMONICS * (MAXIMUM_HARMONICS / MINIMUM_HARMONICS) ** value);
+}
+
+function sliderFromHarmonicLimit(limit) {
+  const bounded = Math.min(MAXIMUM_HARMONICS, Math.max(MINIMUM_HARMONICS, limit));
+  return Math.log(bounded / MINIMUM_HARMONICS) / Math.log(MAXIMUM_HARMONICS / MINIMUM_HARMONICS);
+}
+
+function shiftedMidi(baseMidiNote) {
+  return baseMidiNote + octaveOffset * 12;
+}
+
+function updateOctaveDisplay() {
+  const octave = 4 + octaveOffset;
+  elements.octaveValue.textContent = String(octave);
+  elements.play.textContent = `PREVIEW C${octave}`;
+  requiredElement('[data-midi="60"]', HTMLButtonElement).firstChild.textContent = `C${octave}`;
+  requiredElement('[data-midi="72"]', HTMLButtonElement).firstChild.textContent = `C${octave + 1}`;
+}
+
+function changeOctave(delta) {
+  const next = clamp(octaveOffset + delta, MIN_OCTAVE_OFFSET, MAX_OCTAVE_OFFSET);
+  if (next === octaveOffset) return;
+  octaveOffset = next;
+  updateOctaveDisplay();
+}
+
+function soundingWavetable(target) {
+  const amount = Number(elements.scanSmooth.value);
+  if (!scanning || amount <= 0) {
+    scanSmoothing = null;
+    return target;
+  }
+  if (!scanSmoothing || scanSmoothing.real.length !== target.real.length) {
+    scanSmoothing = {
+      real: Float32Array.from(target.real),
+      imaginary: Float32Array.from(target.imaginary),
+      waveform: Float32Array.from(target.waveform),
+    };
+    return { ...target, ...scanSmoothing };
+  }
+  const alpha = Math.max(MINIMUM_SCAN_GLIDE, (1 - amount) ** 2);
+  for (let index = 0; index < target.real.length; index += 1) {
+    scanSmoothing.real[index] += (target.real[index] - scanSmoothing.real[index]) * alpha;
+    scanSmoothing.imaginary[index] += (target.imaginary[index] - scanSmoothing.imaginary[index]) * alpha;
+  }
+  for (let index = 0; index < target.waveform.length; index += 1) {
+    scanSmoothing.waveform[index] += (target.waveform[index] - scanSmoothing.waveform[index]) * alpha;
+  }
+  return { ...target, ...scanSmoothing };
+}
+
+function updateWavetable() {
+  if (!terrain) return;
+  const parameters = currentWavetableParameters();
+  if (bankTerrain !== terrain || bankBearingDeg !== parameters.bearingDeg) {
+    profileBank = terrainProfileBank(terrain, { bearingDeg: parameters.bearingDeg });
+    bankTerrain = terrain;
+    bankBearingDeg = parameters.bearingDeg;
+  }
+  wavetable = buildTerrainWavetable(terrain, parameters);
+  const sounding = soundingWavetable(wavetable);
+  wavetableInstrument.setWavetable(sounding);
+  drawWavetable(elements.wavetableCanvas, sounding, profileBank);
+  drawTerrain(elements.terrainCanvas, terrain, wavetable.transect);
+  worldMap.setTransect(transectToGeographic(wavetable.transect));
+  elements.sliceDirectionValue.value = `${Math.round(wavetable.transect.bearingDeg).toString().padStart(3, "0")} DEG`;
+  elements.bankPositionValue.value = wavetable.transect.position.toFixed(2);
+  elements.harmonicsValue.value = String(wavetable.maximumHarmonic);
+  elements.transectLength.textContent = `${(wavetable.transect.lengthMeters / 1_000).toFixed(2)} KM`;
+  elements.profileRange.textContent = `${wavetable.minimumElevationMeters.toFixed(0)}–${wavetable.maximumElevationMeters.toFixed(0)} M`;
+  updateTransportAvailability();
+}
+
+function applyTerrain(nextTerrain) {
+  terrain = nextTerrain;
+  worldMap.setTerrainOverlay(terrain.provider === "mapzen-terrain-tiles-aws" ? terrain : null);
+  elements.terrainRange.textContent = `${terrain.minimumElevationMeters.toFixed(0)}–${terrain.maximumElevationMeters.toFixed(0)} M`;
+  elements.terrainProvider.textContent = terrain.provider === "mapzen-terrain-tiles-aws" ? "REAL DEM / MAPZEN-AWS" : "SYNTHETIC FALLBACK";
+  elements.demResolution.textContent = `${terrain.resolutionMeters.toFixed(1)} M NATIVE / ${terrain.size}×${terrain.size} GRID`;
+  updateWavetable();
+}
+
+async function rebuildGeometry() {
+  terrainRequest?.abort();
+  terrainRequest = new AbortController();
+  const request = terrainRequest;
+  const dimensions = areaDimensions(selection);
+  currentSeed = seedFromBounds(selection);
+  terrainLoading = true;
+  updateAreaReadouts();
+  updateTransportAvailability();
+  setDataStatus("", "DEM LOADING");
+
+  try {
+    const realTerrain = await loadTerrainGrid(selection, {
+      size: ANALYSIS_GRID_SIZE,
+      widthMeters: Math.max(500, dimensions.widthMeters),
+      heightMeters: Math.max(500, dimensions.heightMeters),
+      signal: request.signal,
+    });
+    if (request !== terrainRequest) return;
+    applyTerrain(realTerrain);
+    setDataStatus("is-ready", "DEM READY");
+    elements.demSource.textContent = `Z${realTerrain.zoom} / ${realTerrain.tileCount} TILE${realTerrain.tileCount === 1 ? "" : "S"} / ${realTerrain.imagerySources.join(" + ") || "SOURCE METADATA UNAVAILABLE"}`;
+  } catch (error) {
+    if (error instanceof DOMException && error.name === "AbortError") return;
+    console.error(error);
+    applyTerrain(createFoundationTerrain({
+      seed: currentSeed,
+      widthMeters: Math.max(500, dimensions.widthMeters),
+      heightMeters: Math.max(500, dimensions.heightMeters),
+    }));
+    setDataStatus("is-error", "DEM FALLBACK");
+    elements.demSource.textContent = `LOAD FAILED / SYNTHETIC FALLBACK / ${error instanceof Error ? error.message.toUpperCase() : "UNKNOWN ERROR"}`;
+  } finally {
+    if (request === terrainRequest) {
+      terrainLoading = false;
+      updateTransportAvailability();
+    }
+  }
+}
+
+function patchFileStem() {
+  return `geoflute-${currentSeed.toString(16).padStart(8, "0")}-${Math.round(Number(elements.sliceDirection.value)).toString().padStart(3, "0")}deg`;
+}
+
+function patchDocument() {
+  const dimensions = areaDimensions(selection);
+  const parameters = currentWavetableParameters();
+  return createPatch({
+    selection,
+    widthMeters: dimensions.widthMeters,
+    heightMeters: dimensions.heightMeters,
+    provider: terrain.provider,
+    resolutionMeters: terrain.resolutionMeters,
+    gridSize: terrain.size,
+    elevationRangeMeters: [terrain.minimumElevationMeters, terrain.maximumElevationMeters],
+    view: worldMap.viewState(),
+    bearingDeg: parameters.bearingDeg,
+    bankPosition: Number(elements.bankPosition.value),
+    harmonicLimit: parameters.harmonicLimit,
+    seamMethod: parameters.seamMethod,
+    normalized: parameters.normalize,
+    cycleSamples: Number(elements.frameSize.textContent),
+    octaveOffset,
+    attackSeconds: Number(elements.attack.value),
+    releaseSeconds: Number(elements.release.value),
+    scanRateHz: Number(elements.scanRate.value),
+    scanDepth: Number(elements.scanDepth.value),
+    scanSmooth: Number(elements.scanSmooth.value),
+    seed: currentSeed,
+  });
+}
+
+function applyPatch(patch) {
+  stopScan();
+  wavetableInstrument.stopAll();
+  setPressed(elements.hold, false);
+  octaveOffset = patch.octaveOffset;
+  elements.sliceDirection.value = String(patch.bearingDeg);
+  elements.bankPosition.value = String(patch.bankPosition);
+  elements.harmonics.value = String(sliderFromHarmonicLimit(patch.harmonicLimit));
+  elements.attack.value = String(patch.attackSeconds);
+  elements.release.value = String(patch.releaseSeconds);
+  elements.scanRate.value = String(patch.scanRateHz);
+  elements.scanDepth.value = String(patch.scanDepth);
+  elements.scanSmooth.value = String(patch.scanSmooth);
+  setPressed(elements.mirror, patch.seamMethod === "forward-reverse-mirror");
+  setPressed(elements.normalize, patch.normalized);
+  elements.attackValue.value = `${patch.attackSeconds.toFixed(3)} S`;
+  elements.releaseValue.value = `${patch.releaseSeconds.toFixed(3)} S`;
+  elements.scanRateValue.value = `${patch.scanRateHz.toFixed(2)} HZ`;
+  elements.scanDepthValue.value = patch.scanDepth.toFixed(2);
+  elements.scanSmoothValue.value = patch.scanSmooth.toFixed(2);
+  updateOctaveDisplay();
+  selection = patch.selection;
+  worldMap.setSelection(selection);
+  worldMap.setView({ longitude: patch.view.longitude, latitude: patch.view.latitude }, patch.view.zoom);
+  rebuildGeometry();
+}
+
+function stopScan() {
+  if (!scanning) return;
+  scanning = false;
+  scanClock.postMessage(0);
+  scanSmoothing = null;
+  setPressed(elements.scanToggle, false);
+  elements.scanToggle.textContent = "OFF";
+  updateWavetable();
+}
+
+function startScan() {
+  if (scanning) return;
+  scanning = true;
+  scanStartTime = performance.now();
+  scanClock.postMessage(SCAN_UPDATE_INTERVAL_MS);
+  setPressed(elements.scanToggle, true);
+  elements.scanToggle.textContent = "ON";
+}
+
+for (const input of [elements.sliceDirection, elements.bankPosition, elements.harmonics]) {
+  input.addEventListener("input", () => updateWavetable());
+}
+for (const input of [elements.attack, elements.release]) {
+  input.addEventListener("input", () => {
+    elements.attackValue.value = `${Number(elements.attack.value).toFixed(3)} S`;
+    elements.releaseValue.value = `${Number(elements.release.value).toFixed(3)} S`;
+  });
+}
+for (const input of [elements.scanRate, elements.scanDepth, elements.scanSmooth]) {
+  input.addEventListener("input", () => {
+    elements.scanRateValue.value = `${Number(elements.scanRate.value).toFixed(2)} HZ`;
+    elements.scanDepthValue.value = Number(elements.scanDepth.value).toFixed(2);
+    elements.scanSmoothValue.value = Number(elements.scanSmooth.value).toFixed(2);
+  });
+}
+for (const button of [elements.mirror, elements.normalize]) {
+  button.addEventListener("click", () => {
+    setPressed(button, !isPressed(button));
+    updateWavetable();
+  });
+}
+elements.scanToggle.addEventListener("click", () => {
+  if (!scanning) startScan();
+  else stopScan();
+});
+elements.newArea.addEventListener("click", () => {
+  worldMap.armDraw(!isPressed(elements.newArea));
+});
+for (const layerButton of document.querySelectorAll("[data-base-layer]")) {
+  layerButton.addEventListener("click", () => {
+    const provider = layerButton.dataset.baseLayer;
+    worldMap.setProvider(provider);
+    for (const button of document.querySelectorAll("[data-base-layer]")) button.classList.toggle("is-active", button === layerButton);
+    elements.mapAttribution.innerHTML = provider === "relief"
+      ? 'MAP DATA © <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener noreferrer">OPENSTREETMAP CONTRIBUTORS</a>, SRTM / STYLE © <a href="https://opentopomap.org/" target="_blank" rel="noopener noreferrer">OPENTOPOMAP</a> (CC-BY-SA)'
+      : 'MAP © <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener noreferrer">OPENSTREETMAP CONTRIBUTORS</a>';
+  });
+}
+
+for (const button of document.querySelectorAll("[data-midi]")) {
+  const releasePointerNote = (event) => {
+    wavetableInstrument.noteOff(`pointer:${event.pointerId}`, Number(elements.release.value));
+    button.classList.remove("is-active");
+  };
+  button.addEventListener("pointerdown", async (event) => {
+    if (terrainLoading) return;
+    event.preventDefault();
+    button.setPointerCapture(event.pointerId);
+    button.classList.add("is-active");
+    const midiNote = shiftedMidi(Number(button.dataset.midi));
+    try {
+      const played = await wavetableInstrument.noteOn(`pointer:${event.pointerId}`, midiNote, currentEnvelope());
+      elements.audioStatus.textContent = played
+        ? `${midiNoteFrequency(midiNote).toFixed(2)} HZ`
+        : "SILENT / NO RELIEF ON TRANSECT";
+    } catch (error) {
+      elements.audioStatus.textContent = error instanceof Error ? error.message.toUpperCase() : "AUDIO ERROR";
+    }
+  });
+  button.addEventListener("pointerup", releasePointerNote);
+  button.addEventListener("pointercancel", releasePointerNote);
+  button.addEventListener("lostpointercapture", releasePointerNote);
+}
+
+document.addEventListener("keydown", async (event) => {
+  if (event.repeat || event.metaKey || event.ctrlKey || event.altKey || isTypingTarget(event.target)) return;
+
+  if (event.code === "KeyZ" || event.code === "KeyX") {
+    event.preventDefault();
+    changeOctave(event.code === "KeyZ" ? -1 : 1);
+    return;
+  }
+
+  const baseMidiNote = KEYBOARD_NOTES.get(event.code);
+  if (baseMidiNote === undefined) return;
+  event.preventDefault();
+  const midiNote = shiftedMidi(baseMidiNote);
+  noteButton(baseMidiNote)?.classList.add("is-active");
+  try {
+    const played = await wavetableInstrument.noteOn(`key:${event.code}`, midiNote, currentEnvelope());
+    elements.audioStatus.textContent = played
+      ? `${midiNoteFrequency(midiNote).toFixed(2)} HZ`
+      : "SILENT / NO RELIEF ON TRANSECT";
+  } catch (error) {
+    elements.audioStatus.textContent = error instanceof Error ? error.message.toUpperCase() : "AUDIO ERROR";
+  }
+});
+document.addEventListener("keyup", (event) => {
+  const baseMidiNote = KEYBOARD_NOTES.get(event.code);
+  if (baseMidiNote === undefined) return;
+  noteButton(baseMidiNote)?.classList.remove("is-active");
+  wavetableInstrument.noteOff(`key:${event.code}`, Number(elements.release.value));
+});
+
+requiredElement("#zoom-in", HTMLButtonElement).addEventListener("click", () => worldMap.zoomStep(1));
+requiredElement("#zoom-out", HTMLButtonElement).addEventListener("click", () => worldMap.zoomStep(-1));
+requiredElement("#view-world", HTMLButtonElement).addEventListener("click", () => worldMap.setView({ longitude: 0, latitude: 15 }, 2));
+elements.infoToggle.addEventListener("click", () => {
+  const open = elements.infoPanel.hidden;
+  elements.infoPanel.hidden = !open;
+  setPressed(elements.infoToggle, open);
+});
+
+elements.hold.addEventListener("click", async () => {
+  if (isPressed(elements.hold)) {
+    wavetableInstrument.noteOff("hold", Number(elements.release.value));
+    setPressed(elements.hold, false);
+    elements.audioStatus.textContent = "";
+    return;
+  }
+  const midiNote = shiftedMidi(60);
+  try {
+    const played = await wavetableInstrument.noteOn("hold", midiNote, currentEnvelope());
+    setPressed(elements.hold, played);
+    elements.audioStatus.textContent = played
+      ? `HOLD ${midiNoteFrequency(midiNote).toFixed(2)} HZ`
+      : "SILENT / NO RELIEF ON TRANSECT";
+  } catch (error) {
+    elements.audioStatus.textContent = error instanceof Error ? error.message.toUpperCase() : "AUDIO ERROR";
+  }
+});
+
+elements.play.addEventListener("click", async () => {
+  elements.play.disabled = true;
+  clearTimeout(previewTimer);
+  const midiNote = shiftedMidi(60);
+  try {
+    const played = await wavetableInstrument.noteOn("preview", midiNote, currentEnvelope());
+    elements.audioStatus.textContent = played
+      ? `${midiNoteFrequency(midiNote).toFixed(2)} HZ`
+      : "SILENT / NO RELIEF ON TRANSECT";
+    previewTimer = setTimeout(() => {
+      wavetableInstrument.noteOff("preview", Number(elements.release.value));
+      elements.audioStatus.textContent = "";
+    }, 1_500);
+  } catch (error) {
+    elements.audioStatus.textContent = error instanceof Error ? error.message.toUpperCase() : "AUDIO ERROR";
+  } finally {
+    updateTransportAvailability();
+  }
+});
+
+elements.stop.addEventListener("click", () => {
+  clearTimeout(previewTimer);
+  wavetableInstrument.stopAll();
+  setPressed(elements.hold, false);
+  elements.audioStatus.textContent = "";
+});
+
+elements.downloadWav.addEventListener("click", () => {
+  if (!terrain || !wavetable) return;
+  elements.downloadWav.disabled = true;
+  elements.audioStatus.textContent = "RENDERING WAVETABLE…";
+  requestAnimationFrame(() => {
+    try {
+      const frameSamples = Number(elements.frameSize.textContent);
+      const parameters = currentWavetableParameters();
+      const frames = buildWavetableFrames(terrain, parameters, {
+        frames: EXPORT_FRAME_COUNT,
+        frameSamples,
+        fitToPeak: !parameters.normalize,
+      });
+      downloadBlob(
+        encodeWavetableWav(frames, AUDIO_SAMPLE_RATE, {
+          cycleSamples: frameSamples,
+          declareCycle: frameSamples === WAVETABLE_FRAME_SAMPLES,
+        }),
+        `${patchFileStem()}-${EXPORT_FRAME_COUNT}x${frameSamples}.wav`,
+      );
+      elements.audioStatus.textContent = `${EXPORT_FRAME_COUNT} FRAMES / ${frameSamples} SAMPLES`;
+    } catch (error) {
+      elements.audioStatus.textContent = error instanceof Error ? error.message.toUpperCase() : "EXPORT ERROR";
+    } finally {
+      updateTransportAvailability();
+    }
+  });
+});
+elements.exportPatch.addEventListener("click", () => {
+  downloadBlob(
+    new Blob([`${JSON.stringify(patchDocument(), null, 2)}\n`], { type: "application/json" }),
+    `${patchFileStem()}.geoflute-patch.json`,
+  );
+});
+elements.frameSize.addEventListener("click", () => {
+  elements.frameSize.textContent = Number(elements.frameSize.textContent) === WAVETABLE_FRAME_SAMPLES
+    ? String(WAVETABLE_FRAME_SAMPLES / 2)
+    : String(WAVETABLE_FRAME_SAMPLES);
+});
+elements.importPatch.addEventListener("click", () => elements.patchFile.click());
+elements.patchFile.addEventListener("change", async (event) => {
+  const [file] = event.currentTarget.files;
+  event.currentTarget.value = "";
+  if (!file) return;
+  try {
+    applyPatch(parsePatch(await file.text()));
+    elements.audioStatus.textContent = "PATCH LOADED";
+  } catch (error) {
+    elements.audioStatus.textContent = error instanceof Error ? error.message.toUpperCase() : "PATCH ERROR";
+  }
+});
+
+updateOctaveDisplay();
+rebuildGeometry();
