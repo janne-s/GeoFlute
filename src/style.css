@@ -160,11 +160,26 @@ figcaption span:first-child,
 }
 
 .primary-action {
+  position: relative;
   flex: 1;
   border-color: var(--accent);
   background: var(--accent);
   color: var(--bg);
   font-weight: 700;
+}
+
+.primary-action small {
+  position: absolute;
+  right: 4px;
+  bottom: 1px;
+  font-size: 7px;
+  font-weight: 400;
+  opacity: 0.66;
+}
+
+.primary-action[aria-pressed="true"] {
+  background: var(--bg);
+  color: var(--accent);
 }
 
 .primary-action:disabled {
@@ -461,7 +476,13 @@ select {
 
 .export-row {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 5px;
+  margin-top: 5px;
+}
+
+.session-row {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 5px;
   margin-top: 5px;
 }
@@ -475,9 +496,158 @@ select {
   white-space: nowrap;
 }
 
-.export-row .tool:disabled {
+.export-row .tool:disabled,
+.session-row .tool:disabled {
   cursor: not-allowed;
   opacity: 0.45;
+}
+
+.octave-row {
+  display: grid;
+  grid-template-columns: 40px minmax(0, 1fr) 40px;
+  align-items: center;
+  gap: 5px;
+  margin-top: 8px;
+}
+
+.octave-step {
+  position: relative;
+  padding: 0;
+  font-size: 15px;
+}
+
+.octave-step small {
+  position: absolute;
+  right: 3px;
+  bottom: 1px;
+  color: var(--muted);
+  font-size: 7px;
+}
+
+.octave-step:hover small {
+  color: inherit;
+}
+
+.octave-readout {
+  color: var(--muted);
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  text-align: center;
+}
+
+.octave-readout output {
+  color: var(--text);
+}
+
+.export-dialog {
+  width: min(400px, calc(100vw - 32px));
+  padding: 16px;
+  border: 1px solid var(--line-strong);
+  background: var(--surface);
+  color: var(--text);
+}
+
+.export-dialog::backdrop {
+  background: rgb(0 0 0 / 0.72);
+}
+
+.export-dialog h2 {
+  margin: 0 0 12px;
+  color: var(--text);
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.06em;
+}
+
+.export-items {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.export-items label {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto auto;
+  align-items: baseline;
+  gap: 4px 9px;
+  margin: 0;
+  padding: 7px 0;
+  border-top: 1px dotted var(--line);
+  cursor: pointer;
+  font-size: 10px;
+}
+
+.export-items li:first-child label {
+  border-top: 0;
+}
+
+.export-items input {
+  grid-row: span 2;
+  align-self: center;
+  margin: 0;
+  accent-color: var(--accent);
+}
+
+.export-item-name {
+  color: var(--text);
+  letter-spacing: 0.04em;
+}
+
+.export-item-size {
+  color: var(--muted);
+  text-align: right;
+}
+
+.export-item-params {
+  color: var(--muted);
+  font-size: 9px;
+  letter-spacing: 0.04em;
+  text-align: right;
+}
+
+.export-item-target {
+  grid-column: 2 / 5;
+  color: var(--accent);
+  font-size: 9px;
+  letter-spacing: 0.04em;
+}
+
+.export-items label:has(input:checked) .export-item-size {
+  color: var(--text);
+}
+
+.export-footer {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 12px;
+  padding-top: 9px;
+  border-top: 1px dotted var(--line);
+  color: var(--muted);
+  font-size: 9px;
+  letter-spacing: 0.04em;
+}
+
+#export-summary {
+  color: var(--text);
+}
+
+.export-error {
+  margin: 9px 0 0;
+  color: var(--focus);
+  font-size: 10px;
+}
+
+.export-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 5px;
+  margin-top: 14px;
+}
+
+.export-actions .primary-action {
+  flex: 0 0 auto;
+  padding: 4px 18px;
 }
 
 .audio-status {

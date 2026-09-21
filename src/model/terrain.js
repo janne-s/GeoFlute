@@ -1,4 +1,4 @@
-import { createMulberry32 } from "./prng.js";
+import { createMulberry32 } from "./prng.js?v=0.3.0";
 
 export const FOUNDATION_GRID_SIZE = 64;
 export const FOUNDATION_EXTENT_METERS = 20_000;

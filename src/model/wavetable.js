@@ -232,7 +232,7 @@ export function buildWavetableFrames(terrain, parameters = {}, options = {}) {
   let peak = 0;
 
   for (let index = 0; index < count; index += 1) {
-    const position = count === 1 ? 0 : (index / (count - 1)) * 2 - 1;
+    const position = count === 1 ? (parameters.position ?? 0) : (index / (count - 1)) * 2 - 1;
     const wavetable = buildTerrainWavetable(terrain, { ...parameters, position });
     const offset = index * cycleSamples;
     for (let sample = 0; sample < cycleSamples; sample += 1) {
@@ -272,6 +272,24 @@ export function terrainProfileBank(terrain, parameters = {}) {
     profiles.push({ position, elevationMeters });
   }
   return { profiles, minimumElevationMeters, maximumElevationMeters, bearingDeg };
+}
+
+/**
+ * @param {Float32Array} elevationMeters
+ * @param {number} count
+ * @returns {Float32Array}
+ */
+export function resampleProfile(elevationMeters, count) {
+  const points = Math.max(2, Math.round(count));
+  const result = new Float32Array(points);
+  for (let index = 0; index < points; index += 1) {
+    const position = (index / (points - 1)) * (elevationMeters.length - 1);
+    const low = Math.floor(position);
+    const high = Math.min(elevationMeters.length - 1, low + 1);
+    result[index] = elevationMeters[low]
+      + (elevationMeters[high] - elevationMeters[low]) * (position - low);
+  }
+  return result;
 }
 
 export function midiNoteFrequency(midiNote) {

@@ -1,16 +1,22 @@
 import assert from "node:assert/strict";
+import { readFileSync, readdirSync } from "node:fs";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { describe, it } from "node:test";
-import { encodeWavetableWav, WAVETABLE_FRAME_SAMPLES } from "../src/audio/wav.js";
-import { createPatch, parsePatch } from "../src/model/patch.js";
-import { createMulberry32 } from "../src/model/prng.js";
-import { createFlatTerrain, createFoundationTerrain, createSinusoidalRidge } from "../src/model/terrain.js";
+import { encodeWavetableWav, wavetableWavByteLength, WAVETABLE_FRAME_SAMPLES } from "../src/audio/wav.js?v=0.3.0";
+import { zipStore } from "../src/audio/zip.js?v=0.3.0";
+import { WavetableInstrument } from "../src/audio/wavetable-synth.js?v=0.3.0";
+import { APPLICATION_VERSION, createPatch, createReliefProfile, parsePatch } from "../src/model/patch.js?v=0.3.0";
+import { createMulberry32 } from "../src/model/prng.js?v=0.3.0";
+import { createFlatTerrain, createFoundationTerrain, createSinusoidalRidge } from "../src/model/terrain.js?v=0.3.0";
 import {
   buildTerrainWavetable,
   buildWavetableFrames,
   midiNoteFrequency,
   renderWavetableNote,
+  resampleProfile,
   WAVETABLE_LENGTH,
-} from "../src/model/wavetable.js";
+} from "../src/model/wavetable.js?v=0.3.0";
 
 describe("deterministic model foundation", () => {
   it("repeats the same pseudo-random sequence for an identical seed", () => {
@@ -244,5 +250,208 @@ describe("deterministic model foundation", () => {
     assert.equal(loaded.seamMethod, "forward-reverse-mirror");
     assert.equal(loaded.scanRateHz, 0.2);
     assert.equal(loaded.scanDepth, 1);
+  });
+});
+
+describe("sounding voices", () => {
+  function stubVoice(instrument, key, midiNote) {
+    const ramps = [];
+    instrument.voices.set(key, {
+      midiNote,
+      gain: {},
+      oscillator: {
+        frequency: {
+          value: midiNoteFrequency(midiNote),
+          cancelScheduledValues() {},
+          setValueAtTime() {},
+          exponentialRampToValueAtTime(target) {
+            ramps.push(target);
+          },
+        },
+      },
+    });
+    return ramps;
+  }
+
+  it("retunes every sounding voice when the octave moves", () => {
+    const instrument = new WavetableInstrument();
+    instrument.context = { currentTime: 0 };
+    const hold = stubVoice(instrument, "hold", 60);
+    const key = stubVoice(instrument, "key:KeyA", 64);
+
+    instrument.transpose(12);
+
+    assert.equal(instrument.voices.get("hold").midiNote, 72);
+    assert.equal(instrument.voices.get("key:KeyA").midiNote, 76);
+    assert.deepEqual(hold, [midiNoteFrequency(72)]);
+    assert.deepEqual(key, [midiNoteFrequency(76)]);
+  });
+
+  it("leaves voices alone when the octave does not move", () => {
+    const instrument = new WavetableInstrument();
+    instrument.context = { currentTime: 0 };
+    const hold = stubVoice(instrument, "hold", 60);
+
+    instrument.transpose(0);
+
+    assert.equal(instrument.voices.get("hold").midiNote, 60);
+    assert.deepEqual(hold, []);
+  });
+});
+
+describe("browser session", () => {
+  it("restores every control it stored", () => {
+    const state = {
+      selection: { west: -61.75, south: 15.96, east: -61.56, north: 16.16 },
+      widthMeters: 20_325,
+      heightMeters: 22_264,
+      provider: "mapzen-terrain-tiles-aws",
+      resolutionMeters: 36.7,
+      gridSize: 256,
+      elevationRangeMeters: [-18, 1_457],
+      view: { longitude: -61.45, latitude: 16.2, zoom: 9 },
+      bearingDeg: 137,
+      bankPosition: -0.42,
+      harmonicLimit: 96,
+      seamMethod: "direct-profile",
+      normalized: false,
+      cycleSamples: WAVETABLE_FRAME_SAMPLES,
+      octaveOffset: -2,
+      attackSeconds: 0.05,
+      releaseSeconds: 0.9,
+      scanRateHz: 0.65,
+      scanDepth: 0.4,
+      scanSmooth: 0.8,
+      seed: 0x47554c46,
+    };
+    const restored = parsePatch(JSON.stringify(createPatch(state)));
+
+    assert.deepEqual(restored.selection, state.selection);
+    assert.equal(restored.bearingDeg, state.bearingDeg);
+    assert.equal(restored.bankPosition, state.bankPosition);
+    assert.equal(restored.harmonicLimit, state.harmonicLimit);
+    assert.equal(restored.seamMethod, state.seamMethod);
+    assert.equal(restored.normalized, state.normalized);
+    assert.equal(restored.octaveOffset, state.octaveOffset);
+    assert.equal(restored.attackSeconds, state.attackSeconds);
+    assert.equal(restored.releaseSeconds, state.releaseSeconds);
+    assert.equal(restored.scanRateHz, state.scanRateHz);
+    assert.equal(restored.scanDepth, state.scanDepth);
+    assert.equal(restored.scanSmooth, state.scanSmooth);
+    assert.equal(restored.view.zoom, state.view.zoom);
+  });
+
+  it("refuses stored content that is not a GeoFlute session", () => {
+    assert.throws(() => parsePatch("<!doctype html>"), /not valid JSON/);
+    assert.throws(() => parsePatch('{"format":"echotect-project"}'), /not a GeoFlute patch/);
+  });
+});
+
+describe("export package", () => {
+  it("predicts the encoded WAV length without rendering it", async () => {
+    const samples = new Float32Array(4 * WAVETABLE_FRAME_SAMPLES);
+    for (const options of [
+      { cycleSamples: WAVETABLE_FRAME_SAMPLES },
+      { cycleSamples: 1_024, declareCycle: false },
+    ]) {
+      const blob = encodeWavetableWav(samples, 44_100, options);
+      assert.equal(wavetableWavByteLength(samples.length, options), blob.size);
+    }
+  });
+
+  it("writes a store-only archive that repeats byte for byte", () => {
+    const files = [
+      { name: "a.wav", data: new Uint8Array([1, 2, 3, 4]) },
+      { name: "b.json", data: new TextEncoder().encode("{}\n") },
+    ];
+    const archive = zipStore(files);
+    const view = new DataView(archive.buffer, archive.byteOffset, archive.byteLength);
+    assert.equal(view.getUint32(0, true), 0x04034b50);
+    assert.equal(view.getUint32(archive.length - 22, true), 0x06054b50);
+    assert.equal(view.getUint16(archive.length - 12, true), files.length);
+    assert.deepEqual(zipStore(files), archive);
+  });
+
+  it("keeps the single-frame bank on the selected transect", () => {
+    const terrain = createFoundationTerrain();
+    const centre = buildWavetableFrames(terrain, { bearingDeg: 90, position: 0 }, { frames: 1 });
+    const offset = buildWavetableFrames(terrain, { bearingDeg: 90, position: 0.8 }, { frames: 1 });
+    assert.equal(centre.length, WAVETABLE_LENGTH);
+    assert.notDeepEqual(Array.from(offset), Array.from(centre));
+  });
+
+  it("resamples a transect profile without moving its endpoints", () => {
+    const source = Float32Array.from({ length: 2_048 }, (_, index) => index);
+    const resampled = resampleProfile(source, 64);
+    assert.equal(resampled.length, 64);
+    assert.equal(resampled[0], source[0]);
+    assert.equal(resampled[63], source[2_047]);
+  });
+
+  it("carries the relief itself, not only the bounds that produced it", () => {
+    const terrain = createFoundationTerrain();
+    const wavetable = buildTerrainWavetable(terrain, { bearingDeg: 45, seamMethod: "direct-profile" });
+    const document = createReliefProfile({
+      selection: { west: -1, south: -1, east: 1, north: 1 },
+      widthMeters: terrain.widthMeters,
+      heightMeters: terrain.heightMeters,
+      provider: "test",
+      resolutionMeters: 30,
+      gridSize: terrain.size,
+      bearingDeg: wavetable.transect.bearingDeg,
+      bankPosition: wavetable.transect.position,
+      lengthMeters: wavetable.transect.lengthMeters,
+      elevationMeters: resampleProfile(wavetable.elevationMeters, 64),
+      seed: 1,
+    });
+
+    assert.equal(document.format, "geoflute-relief");
+    assert.equal(document.transect.sections, 64);
+    assert.equal(document.elevationMeters.length, 64);
+    assert.equal(document.provenance, "SIMULATED");
+    assert.ok(document.elevationRangeMeters[1] > document.elevationRangeMeters[0]);
+    assert.ok(document.elevationMeters.every(Number.isFinite));
+  });
+
+  it("keeps a flat transect flat in the relief document", () => {
+    const terrain = createFlatTerrain();
+    const wavetable = buildTerrainWavetable(terrain, { seamMethod: "direct-profile" });
+    const profile = resampleProfile(wavetable.elevationMeters, 64);
+    const range = Math.max(...profile) - Math.min(...profile);
+    assert.ok(range < 1e-6);
+  });
+});
+
+describe("release version", () => {
+  const packageVersion = JSON.parse(readFileSync(new URL("../package.json", import.meta.url))).version;
+
+  function sourceFiles(directory) {
+    return readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
+      const path = join(directory, entry.name);
+      if (entry.isDirectory()) return sourceFiles(path);
+      return entry.name.endsWith(".js") ? [path] : [];
+    });
+  }
+
+  it("stamps the package version on every relative import", () => {
+    const pattern = /from "(\.\.?\/[^"]+)"/g;
+    const stale = [];
+    const roots = ["../src", "../tests"].map((directory) => fileURLToPath(new URL(directory, import.meta.url)));
+    for (const path of roots.flatMap(sourceFiles)) {
+      for (const [, specifier] of readFileSync(path, "utf8").matchAll(pattern)) {
+        if (specifier !== `${specifier.split("?")[0]}?v=${packageVersion}`) stale.push(`${path}: ${specifier}`);
+      }
+    }
+    assert.deepEqual(stale, [], `unversioned or stale imports:\n${stale.join("\n")}`);
+  });
+
+  it("stamps the package version on the entry URLs", () => {
+    const html = readFileSync(new URL("../index.html", import.meta.url), "utf8");
+    assert.match(html, new RegExp(`src="\\./src/main\\.js\\?v=${packageVersion}"`));
+    assert.match(html, new RegExp(`href="\\./src/style\\.css\\?v=${packageVersion}"`));
+  });
+
+  it("reports the package version in exported documents", () => {
+    assert.equal(APPLICATION_VERSION, packageVersion);
   });
 });

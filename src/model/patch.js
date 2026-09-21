@@ -1,7 +1,12 @@
-import { SEAM_METHODS } from "./wavetable.js";
+import { SEAM_METHODS } from "./wavetable.js?v=0.3.0";
 
 export const PATCH_FORMAT = "geoflute-patch";
 export const PATCH_SCHEMA_VERSION = 1;
+export const RELIEF_FORMAT = "geoflute-relief";
+export const RELIEF_SCHEMA_VERSION = 1;
+
+export const APPLICATION_VERSION = "0.3.0";
+const DISCLAIMER = "Direct terrain-profile mapping for musical synthesis; not an environmental sound recording or physical simulation.";
 
 const RANGES = {
   bearingDeg: { minimum: 0, maximum: 359, fallback: 90 },
@@ -35,9 +40,9 @@ export function createPatch(state) {
     format: PATCH_FORMAT,
     schemaVersion: PATCH_SCHEMA_VERSION,
     name: "GeoFlute terrain wavetable",
-    application: { version: "0.3.0", exportedAt: new Date().toISOString() },
+    application: { version: APPLICATION_VERSION, exportedAt: new Date().toISOString() },
     provenance: "SIMULATED",
-    disclaimer: "Direct terrain-profile mapping for musical synthesis; not an environmental sound recording or physical simulation.",
+    disclaimer: DISCLAIMER,
     geometry: {
       bounds: state.selection,
       widthMeters: state.widthMeters,
@@ -65,6 +70,45 @@ export function createPatch(state) {
       depth: state.scanDepth,
       smooth: state.scanSmooth,
     },
+    seed: state.seed,
+  };
+}
+
+/**
+ * The transect's elevation as its own document, so a reader can rebuild the
+ * relief without reaching the DEM provider.
+ */
+export function createReliefProfile(state) {
+  let minimumElevationMeters = Number.POSITIVE_INFINITY;
+  let maximumElevationMeters = Number.NEGATIVE_INFINITY;
+  for (const elevation of state.elevationMeters) {
+    minimumElevationMeters = Math.min(minimumElevationMeters, elevation);
+    maximumElevationMeters = Math.max(maximumElevationMeters, elevation);
+  }
+  return {
+    format: RELIEF_FORMAT,
+    schemaVersion: RELIEF_SCHEMA_VERSION,
+    name: "GeoFlute transect relief",
+    application: { version: APPLICATION_VERSION, exportedAt: new Date().toISOString() },
+    provenance: "SIMULATED",
+    disclaimer: DISCLAIMER,
+    units: { elevation: "metres", distance: "metres", angle: "compass-degrees" },
+    geometry: {
+      bounds: state.selection,
+      widthMeters: state.widthMeters,
+      heightMeters: state.heightMeters,
+      provider: state.provider,
+      nativeResolutionMeters: state.resolutionMeters,
+      gridSize: state.gridSize,
+    },
+    transect: {
+      bearingDeg: state.bearingDeg,
+      bankPosition: state.bankPosition,
+      lengthMeters: state.lengthMeters,
+      sections: state.elevationMeters.length,
+    },
+    elevationRangeMeters: [minimumElevationMeters, maximumElevationMeters],
+    elevationMeters: Array.from(state.elevationMeters, (value) => Number(value.toFixed(2))),
     seed: state.seed,
   };
 }

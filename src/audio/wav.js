@@ -55,6 +55,16 @@ export function encodeWavetableWav(samples, sampleRate, options = {}) {
   return new Blob([buffer], { type: "audio/wav" });
 }
 
+/**
+ * @param {number} sampleCount
+ * @param {{ cycleSamples?: number, declareCycle?: boolean }} [options]
+ */
+export function wavetableWavByteLength(sampleCount, options = {}) {
+  const declareCycle = options.declareCycle ?? true;
+  const comment = declareCycle ? clmComment(options.cycleSamples ?? WAVETABLE_FRAME_SAMPLES) : "";
+  return 44 + (declareCycle ? 8 + comment.length : 0) + sampleCount * 2;
+}
+
 export function downloadBlob(blob, filename) {
   const url = URL.createObjectURL(blob);
   const anchor = document.createElement("a");

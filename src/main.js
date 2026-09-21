@@ -1,16 +1,18 @@
-import { downloadBlob, encodeWavetableWav, WAVETABLE_FRAME_SAMPLES } from "./audio/wav.js";
-import { WavetableInstrument } from "./audio/wavetable-synth.js";
-import { loadTerrainGrid } from "./data/terrain-tiles.js";
-import { WorldMap } from "./map/world-map.js";
-import { createFoundationTerrain, FOUNDATION_SEED } from "./model/terrain.js";
-import { createPatch, parsePatch } from "./model/patch.js";
+import { downloadBlob, encodeWavetableWav, wavetableWavByteLength, WAVETABLE_FRAME_SAMPLES } from "./audio/wav.js?v=0.3.0";
+import { zipStore } from "./audio/zip.js?v=0.3.0";
+import { WavetableInstrument } from "./audio/wavetable-synth.js?v=0.3.0";
+import { loadTerrainGrid } from "./data/terrain-tiles.js?v=0.3.0";
+import { WorldMap } from "./map/world-map.js?v=0.3.0";
+import { createFoundationTerrain, FOUNDATION_SEED } from "./model/terrain.js?v=0.3.0";
+import { createPatch, createReliefProfile, parsePatch } from "./model/patch.js?v=0.3.0";
 import {
   buildTerrainWavetable,
   buildWavetableFrames,
   midiNoteFrequency,
+  resampleProfile,
   terrainProfileBank,
-} from "./model/wavetable.js";
-import { drawTerrain, drawWavetable } from "./visual/canvas.js";
+} from "./model/wavetable.js?v=0.3.0";
+import { drawTerrain, drawWavetable } from "./visual/canvas.js?v=0.3.0";
 
 const DEFAULT_SELECTION = {
   west: -61.75,
@@ -28,6 +30,11 @@ const MINIMUM_SCAN_GLIDE = 0.015;
 const MINIMUM_HARMONICS = 2;
 const MAXIMUM_HARMONICS = 256;
 const EXPORT_FRAME_COUNT = 256;
+const ABLETON_FRAME_SAMPLES = WAVETABLE_FRAME_SAMPLES / 2;
+const RELIEF_SECTIONS = 64;
+const PREVIEW_SECONDS = 1.5;
+const SESSION_STORAGE_KEY = "geoflute-session";
+const SESSION_SAVE_DELAY_MS = 500;
 const KEYBOARD_NOTES = new Map([
   ["KeyA", 60], ["KeyW", 61], ["KeyS", 62], ["KeyE", 63],
   ["KeyD", 64], ["KeyF", 65], ["KeyT", 66], ["KeyG", 67],
@@ -111,7 +118,7 @@ root.innerHTML = `
         </section>
 
         <section class="panel module play-module">
-          <h2><span>PLAY</span><small>OCT <output id="octave-value">4</output> · Z/X</small></h2>
+          <h2>PLAY</h2>
           <label for="attack">ATTACK <output id="attack-value">0.020 S</output></label>
           <input id="attack" type="range" min="0.003" max="1" step="0.001" value="0.02" />
           <label for="release">RELEASE <output id="release-value">0.300 S</output></label>
@@ -135,20 +142,27 @@ root.innerHTML = `
               <button type="button" data-midi="70" style="--slot: 5" aria-label="A sharp, keyboard U"><small>U</small></button>
             </div>
           </div>
+          <div class="octave-row">
+            <button class="tool octave-step" id="octave-down" type="button" aria-label="Octave down, keyboard Z"><span>−</span><small>Z</small></button>
+            <span class="octave-readout">OCT <output id="octave-value">4</output></span>
+            <button class="tool octave-step" id="octave-up" type="button" aria-label="Octave up, keyboard X"><span>+</span><small>X</small></button>
+          </div>
         </section>
 
         <section class="panel module">
-          <h2><span>OUTPUT</span><button class="tool" id="frame-size" type="button">1024</button></h2>
+          <h2>OUTPUT</h2>
           <div class="transport">
-            <button id="play" class="primary-action" type="button" disabled>PREVIEW C4</button>
+            <button id="play" class="primary-action" type="button" aria-pressed="false" disabled><span id="play-label">PREVIEW C4</span><small>SPACE</small></button>
             <button id="hold" class="tool" type="button" aria-pressed="false" disabled>HOLD</button>
             <button id="stop" class="tool" type="button">STOP</button>
           </div>
           <div class="export-row">
-            <button id="download-wav" class="tool" type="button" disabled>WAV</button>
-            <button id="export-patch" class="tool" type="button">SAVE</button>
-            <button id="import-patch" class="tool" type="button">LOAD</button>
-            <input id="patch-file" class="sr-only" type="file" accept=".json,application/json" />
+            <button id="open-export" class="tool" type="button" disabled>EXPORT</button>
+          </div>
+          <div class="session-row">
+            <button id="save-session" class="tool" type="button" disabled>SAVE</button>
+            <button id="open-session" class="tool" type="button">OPEN</button>
+            <input id="session-file" class="sr-only" type="file" accept=".json,application/json" />
           </div>
           <div id="audio-status" class="audio-status" aria-live="polite">…</div>
         </section>
@@ -168,6 +182,68 @@ root.innerHTML = `
         </figure>
       </div>
     </section>
+
+    <dialog id="export-dialog" class="export-dialog" aria-labelledby="export-title">
+      <form id="export-form" method="dialog">
+        <h2 id="export-title">EXPORT</h2>
+        <ul class="export-items">
+          <li>
+            <label>
+              <input type="checkbox" name="export-item" value="serum" checked />
+              <span class="export-item-name">WAVETABLE BANK</span>
+              <span class="export-item-target">SERUM · VITAL · BITWIG</span>
+              <span class="export-item-params">${EXPORT_FRAME_COUNT} × ${WAVETABLE_FRAME_SAMPLES} · CLM</span>
+              <span class="export-item-size" id="export-size-serum"></span>
+            </label>
+          </li>
+          <li>
+            <label>
+              <input type="checkbox" name="export-item" value="ableton" checked />
+              <span class="export-item-name">WAVETABLE BANK</span>
+              <span class="export-item-target">ABLETON</span>
+              <span class="export-item-params">${EXPORT_FRAME_COUNT} × ${ABLETON_FRAME_SAMPLES}</span>
+              <span class="export-item-size" id="export-size-ableton"></span>
+            </label>
+          </li>
+          <li>
+            <label>
+              <input type="checkbox" name="export-item" value="cycle" />
+              <span class="export-item-name">SINGLE CYCLE</span>
+              <span class="export-item-target">SAMPLER · BUFFER~</span>
+              <span class="export-item-params">1 × ${WAVETABLE_FRAME_SAMPLES}</span>
+              <span class="export-item-size" id="export-size-cycle"></span>
+            </label>
+          </li>
+          <li>
+            <label>
+              <input type="checkbox" name="export-item" value="metadata" checked />
+              <span class="export-item-name">METADATA</span>
+              <span class="export-item-target">BOUNDS · DEM · SETTINGS · PROVENANCE</span>
+              <span class="export-item-params">JSON</span>
+              <span class="export-item-size" id="export-size-metadata"></span>
+            </label>
+          </li>
+          <li>
+            <label>
+              <input type="checkbox" name="export-item" value="relief" />
+              <span class="export-item-name">RELIEF PROFILE</span>
+              <span class="export-item-target">JSON</span>
+              <span class="export-item-params">${RELIEF_SECTIONS} × FLOAT</span>
+              <span class="export-item-size" id="export-size-relief"></span>
+            </label>
+          </li>
+        </ul>
+        <div class="export-footer">
+          <span id="export-format">44.1 KHZ · 16-BIT PCM · MONO</span>
+          <span id="export-summary"></span>
+        </div>
+        <p id="export-error" class="export-error" role="alert" hidden></p>
+        <div class="export-actions">
+          <button class="tool" value="cancel" type="submit">CANCEL</button>
+          <button id="export-submit" class="primary-action" value="export" type="submit">EXPORT</button>
+        </div>
+      </form>
+    </dialog>
   </main>
 `;
 
@@ -215,13 +291,20 @@ const elements = {
   attack: requiredElement("#attack", HTMLInputElement),
   release: requiredElement("#release", HTMLInputElement),
   play: requiredElement("#play", HTMLButtonElement),
+  playLabel: requiredElement("#play-label", HTMLElement),
   hold: requiredElement("#hold", HTMLButtonElement),
   stop: requiredElement("#stop", HTMLButtonElement),
-  downloadWav: requiredElement("#download-wav", HTMLButtonElement),
-  exportPatch: requiredElement("#export-patch", HTMLButtonElement),
-  importPatch: requiredElement("#import-patch", HTMLButtonElement),
-  frameSize: requiredElement("#frame-size", HTMLButtonElement),
-  patchFile: requiredElement("#patch-file", HTMLInputElement),
+  octaveDown: requiredElement("#octave-down", HTMLButtonElement),
+  octaveUp: requiredElement("#octave-up", HTMLButtonElement),
+  openExport: requiredElement("#open-export", HTMLButtonElement),
+  saveSession: requiredElement("#save-session", HTMLButtonElement),
+  openSession: requiredElement("#open-session", HTMLButtonElement),
+  sessionFile: requiredElement("#session-file", HTMLInputElement),
+  exportDialog: requiredElement("#export-dialog", HTMLDialogElement),
+  exportForm: requiredElement("#export-form", HTMLFormElement),
+  exportSubmit: requiredElement("#export-submit", HTMLButtonElement),
+  exportSummary: requiredElement("#export-summary", HTMLElement),
+  exportError: requiredElement("#export-error", HTMLElement),
   sliceDirectionValue: requiredElement("#slice-direction-value", HTMLOutputElement),
   bankPositionValue: requiredElement("#bank-position-value", HTMLOutputElement),
   harmonicsValue: requiredElement("#harmonics-value", HTMLOutputElement),
@@ -247,6 +330,7 @@ const elements = {
   infoPanel: requiredElement("#info-panel", HTMLElement),
 };
 
+let sessionSaveTimer = 0;
 let selection = { ...DEFAULT_SELECTION };
 let terrain;
 let wavetable;
@@ -254,6 +338,7 @@ let currentSeed = FOUNDATION_SEED;
 let terrainRequest = null;
 let terrainLoading = true;
 let previewTimer = null;
+let previewSounding = false;
 let octaveOffset = 0;
 let profileBank = null;
 let bankTerrain = null;
@@ -341,7 +426,8 @@ function updateAreaReadouts() {
 function updateTransportAvailability() {
   elements.play.disabled = terrainLoading || !terrain;
   elements.hold.disabled = terrainLoading || !terrain;
-  elements.downloadWav.disabled = !wavetable;
+  elements.openExport.disabled = !wavetable;
+  elements.saveSession.disabled = !terrain;
 }
 
 const TEXT_ENTRY_TYPES = new Set(["text", "search", "url", "email", "password", "number", "tel"]);
@@ -372,7 +458,7 @@ function shiftedMidi(baseMidiNote) {
 function updateOctaveDisplay() {
   const octave = 4 + octaveOffset;
   elements.octaveValue.textContent = String(octave);
-  elements.play.textContent = `PREVIEW C${octave}`;
+  elements.playLabel.textContent = `PREVIEW C${octave}`;
   requiredElement('[data-midi="60"]', HTMLButtonElement).firstChild.textContent = `C${octave}`;
   requiredElement('[data-midi="72"]', HTMLButtonElement).firstChild.textContent = `C${octave + 1}`;
 }
@@ -380,8 +466,11 @@ function updateOctaveDisplay() {
 function changeOctave(delta) {
   const next = clamp(octaveOffset + delta, MIN_OCTAVE_OFFSET, MAX_OCTAVE_OFFSET);
   if (next === octaveOffset) return;
+  const semitones = (next - octaveOffset) * 12;
   octaveOffset = next;
+  wavetableInstrument.transpose(semitones);
   updateOctaveDisplay();
+  scheduleSessionSave();
 }
 
 function soundingWavetable(target) {
@@ -501,7 +590,7 @@ function patchDocument() {
     harmonicLimit: parameters.harmonicLimit,
     seamMethod: parameters.seamMethod,
     normalized: parameters.normalize,
-    cycleSamples: Number(elements.frameSize.textContent),
+    cycleSamples: WAVETABLE_FRAME_SAMPLES,
     octaveOffset,
     attackSeconds: Number(elements.attack.value),
     releaseSeconds: Number(elements.release.value),
@@ -514,6 +603,7 @@ function patchDocument() {
 
 function applyPatch(patch) {
   stopScan();
+  stopPreview();
   wavetableInstrument.stopAll();
   setPressed(elements.hold, false);
   octaveOffset = patch.octaveOffset;
@@ -537,6 +627,42 @@ function applyPatch(patch) {
   worldMap.setSelection(selection);
   worldMap.setView({ longitude: patch.view.longitude, latitude: patch.view.latitude }, patch.view.zoom);
   rebuildGeometry();
+}
+
+function scheduleSessionSave() {
+  clearTimeout(sessionSaveTimer);
+  sessionSaveTimer = setTimeout(saveSession, SESSION_SAVE_DELAY_MS);
+}
+
+function saveSession() {
+  clearTimeout(sessionSaveTimer);
+  if (!terrain) return;
+  try {
+    localStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify(patchDocument()));
+  } catch {
+    return;
+  }
+}
+
+function restoreSession() {
+  let stored;
+  try {
+    stored = localStorage.getItem(SESSION_STORAGE_KEY);
+  } catch {
+    return false;
+  }
+  if (!stored) return false;
+  try {
+    applyPatch(parsePatch(stored));
+    return true;
+  } catch {
+    try {
+      localStorage.removeItem(SESSION_STORAGE_KEY);
+    } catch {
+      return false;
+    }
+    return false;
+  }
 }
 
 function stopScan() {
@@ -626,6 +752,13 @@ for (const button of document.querySelectorAll("[data-midi]")) {
 document.addEventListener("keydown", async (event) => {
   if (event.repeat || event.metaKey || event.ctrlKey || event.altKey || isTypingTarget(event.target)) return;
 
+  if (event.code === "Space") {
+    if (event.target instanceof HTMLButtonElement) return;
+    event.preventDefault();
+    await togglePreview();
+    return;
+  }
+
   if (event.code === "KeyZ" || event.code === "KeyX") {
     event.preventDefault();
     changeOctave(event.code === "KeyZ" ? -1 : 1);
@@ -662,6 +795,33 @@ elements.infoToggle.addEventListener("click", () => {
   setPressed(elements.infoToggle, open);
 });
 
+elements.saveSession.addEventListener("click", () => {
+  if (!terrain) return;
+  downloadBlob(
+    new Blob([`${JSON.stringify(patchDocument(), null, 2)}\n`], { type: "application/json" }),
+    `${patchFileStem()}.geoflute.json`,
+  );
+  elements.audioStatus.textContent = "SESSION SAVED";
+});
+
+elements.openSession.addEventListener("click", () => elements.sessionFile.click());
+
+elements.sessionFile.addEventListener("change", async (event) => {
+  const [file] = event.currentTarget.files;
+  event.currentTarget.value = "";
+  if (!file) return;
+  try {
+    applyPatch(parsePatch(await file.text()));
+    saveSession();
+    elements.audioStatus.textContent = "SESSION OPENED";
+  } catch (error) {
+    elements.audioStatus.textContent = error instanceof Error ? error.message.toUpperCase() : "SESSION ERROR";
+  }
+});
+
+elements.octaveDown.addEventListener("click", () => changeOctave(-1));
+elements.octaveUp.addEventListener("click", () => changeOctave(1));
+
 elements.hold.addEventListener("click", async () => {
   if (isPressed(elements.hold)) {
     wavetableInstrument.noteOff("hold", Number(elements.release.value));
@@ -681,84 +841,191 @@ elements.hold.addEventListener("click", async () => {
   }
 });
 
-elements.play.addEventListener("click", async () => {
-  elements.play.disabled = true;
+function stopPreview() {
   clearTimeout(previewTimer);
+  if (!previewSounding) return;
+  previewSounding = false;
+  setPressed(elements.play, false);
+  wavetableInstrument.noteOff("preview", Number(elements.release.value));
+  elements.audioStatus.textContent = "";
+}
+
+async function togglePreview() {
+  if (previewSounding) {
+    stopPreview();
+    return;
+  }
+  elements.play.disabled = true;
   const midiNote = shiftedMidi(60);
   try {
     const played = await wavetableInstrument.noteOn("preview", midiNote, currentEnvelope());
+    previewSounding = played;
+    setPressed(elements.play, played);
     elements.audioStatus.textContent = played
       ? `${midiNoteFrequency(midiNote).toFixed(2)} HZ`
       : "SILENT / NO RELIEF ON TRANSECT";
-    previewTimer = setTimeout(() => {
-      wavetableInstrument.noteOff("preview", Number(elements.release.value));
-      elements.audioStatus.textContent = "";
-    }, 1_500);
+    if (played) previewTimer = setTimeout(stopPreview, PREVIEW_SECONDS * 1_000);
   } catch (error) {
     elements.audioStatus.textContent = error instanceof Error ? error.message.toUpperCase() : "AUDIO ERROR";
   } finally {
     updateTransportAvailability();
   }
-});
+}
+
+elements.play.addEventListener("click", togglePreview);
 
 elements.stop.addEventListener("click", () => {
-  clearTimeout(previewTimer);
+  stopPreview();
   wavetableInstrument.stopAll();
   setPressed(elements.hold, false);
   elements.audioStatus.textContent = "";
 });
 
-elements.downloadWav.addEventListener("click", () => {
-  if (!terrain || !wavetable) return;
-  elements.downloadWav.disabled = true;
-  elements.audioStatus.textContent = "RENDERING WAVETABLE…";
-  requestAnimationFrame(() => {
-    try {
-      const frameSamples = Number(elements.frameSize.textContent);
-      const parameters = currentWavetableParameters();
-      const frames = buildWavetableFrames(terrain, parameters, {
-        frames: EXPORT_FRAME_COUNT,
-        frameSamples,
-        fitToPeak: !parameters.normalize,
-      });
-      downloadBlob(
-        encodeWavetableWav(frames, AUDIO_SAMPLE_RATE, {
-          cycleSamples: frameSamples,
-          declareCycle: frameSamples === WAVETABLE_FRAME_SAMPLES,
-        }),
-        `${patchFileStem()}-${EXPORT_FRAME_COUNT}x${frameSamples}.wav`,
-      );
-      elements.audioStatus.textContent = `${EXPORT_FRAME_COUNT} FRAMES / ${frameSamples} SAMPLES`;
-    } catch (error) {
-      elements.audioStatus.textContent = error instanceof Error ? error.message.toUpperCase() : "EXPORT ERROR";
-    } finally {
-      updateTransportAvailability();
-    }
-  });
-});
-elements.exportPatch.addEventListener("click", () => {
-  downloadBlob(
-    new Blob([`${JSON.stringify(patchDocument(), null, 2)}\n`], { type: "application/json" }),
-    `${patchFileStem()}.geoflute-patch.json`,
+function exportSelection() {
+  return new Set(
+    [...elements.exportForm.querySelectorAll('input[name="export-item"]')]
+      .filter((input) => input instanceof HTMLInputElement && input.checked)
+      .map((input) => input.value),
   );
+}
+
+function reliefDocument() {
+  const dimensions = areaDimensions(selection);
+  return createReliefProfile({
+    selection,
+    widthMeters: dimensions.widthMeters,
+    heightMeters: dimensions.heightMeters,
+    provider: terrain.provider,
+    resolutionMeters: terrain.resolutionMeters,
+    gridSize: terrain.size,
+    bearingDeg: wavetable.transect.bearingDeg,
+    bankPosition: wavetable.transect.position,
+    lengthMeters: wavetable.transect.lengthMeters,
+    elevationMeters: resampleProfile(wavetable.elevationMeters, RELIEF_SECTIONS),
+    seed: currentSeed,
+  });
+}
+
+function documentByteLength(document) {
+  return new TextEncoder().encode(`${JSON.stringify(document, null, 2)}\n`).length;
+}
+
+function exportItemSizes() {
+  return {
+    serum: wavetableWavByteLength(EXPORT_FRAME_COUNT * WAVETABLE_FRAME_SAMPLES, {
+      cycleSamples: WAVETABLE_FRAME_SAMPLES,
+    }),
+    ableton: wavetableWavByteLength(EXPORT_FRAME_COUNT * ABLETON_FRAME_SAMPLES, { declareCycle: false }),
+    cycle: wavetableWavByteLength(WAVETABLE_FRAME_SAMPLES, { declareCycle: false }),
+    metadata: documentByteLength(patchDocument()),
+    relief: documentByteLength(reliefDocument()),
+  };
+}
+
+function formatBytes(bytes) {
+  if (bytes >= 1_000_000) return `${(bytes / 1_048_576).toFixed(1)} MB`;
+  return `${Math.round(bytes / 1_024)} KB`;
+}
+
+function updateExportSummary() {
+  const sizes = exportItemSizes();
+  for (const [key, bytes] of Object.entries(sizes)) {
+    requiredElement(`#export-size-${key}`, HTMLElement).textContent = formatBytes(bytes);
+  }
+  const selected = exportSelection();
+  const total = [...selected].reduce((sum, key) => sum + sizes[key], 0);
+  elements.exportSummary.textContent = selected.size
+    ? `${selected.size} ${selected.size === 1 ? "FILE" : "FILES"} · ${formatBytes(total)}${selected.size > 1 ? " · ZIP" : ""}`
+    : "";
+  elements.exportSubmit.disabled = selected.size === 0;
+}
+
+function bankFile(stem, frameSamples, declareCycle, suffix) {
+  const parameters = currentWavetableParameters();
+  const frames = buildWavetableFrames(terrain, parameters, {
+    frames: EXPORT_FRAME_COUNT,
+    frameSamples,
+    fitToPeak: !parameters.normalize,
+  });
+  return {
+    name: `${stem}-${suffix}.wav`,
+    blob: encodeWavetableWav(frames, AUDIO_SAMPLE_RATE, { cycleSamples: frameSamples, declareCycle }),
+  };
+}
+
+function cycleFile(stem) {
+  const parameters = currentWavetableParameters();
+  const samples = buildWavetableFrames(terrain, parameters, {
+    frames: 1,
+    frameSamples: WAVETABLE_FRAME_SAMPLES,
+    fitToPeak: !parameters.normalize,
+  });
+  return {
+    name: `${stem}-cycle.wav`,
+    blob: encodeWavetableWav(samples, AUDIO_SAMPLE_RATE, { declareCycle: false }),
+  };
+}
+
+function documentFile(name, document) {
+  return {
+    name,
+    blob: new Blob([`${JSON.stringify(document, null, 2)}\n`], { type: "application/json" }),
+  };
+}
+
+async function buildExportFiles(selected, stem) {
+  const files = [];
+  if (selected.has("serum")) files.push(bankFile(stem, WAVETABLE_FRAME_SAMPLES, true, "serum"));
+  if (selected.has("ableton")) files.push(bankFile(stem, ABLETON_FRAME_SAMPLES, false, "ableton"));
+  if (selected.has("cycle")) files.push(cycleFile(stem));
+  if (selected.has("metadata")) files.push(documentFile(`${stem}.geoflute.json`, patchDocument()));
+  if (selected.has("relief")) files.push(documentFile(`${stem}.geoflute-relief.json`, reliefDocument()));
+  return files;
+}
+
+elements.openExport.addEventListener("click", () => {
+  if (!terrain || !wavetable) return;
+  elements.exportError.hidden = true;
+  updateExportSummary();
+  elements.exportDialog.showModal();
 });
-elements.frameSize.addEventListener("click", () => {
-  elements.frameSize.textContent = Number(elements.frameSize.textContent) === WAVETABLE_FRAME_SAMPLES
-    ? String(WAVETABLE_FRAME_SAMPLES / 2)
-    : String(WAVETABLE_FRAME_SAMPLES);
-});
-elements.importPatch.addEventListener("click", () => elements.patchFile.click());
-elements.patchFile.addEventListener("change", async (event) => {
-  const [file] = event.currentTarget.files;
-  event.currentTarget.value = "";
-  if (!file) return;
+
+elements.exportForm.addEventListener("change", updateExportSummary);
+
+elements.exportForm.addEventListener("submit", async (event) => {
+  if (event.submitter instanceof HTMLButtonElement && event.submitter.value === "cancel") return;
+  event.preventDefault();
+  const selected = exportSelection();
+  if (!selected.size || !terrain || !wavetable) return;
+  elements.exportSubmit.disabled = true;
+  elements.exportError.hidden = true;
+  elements.audioStatus.textContent = "RENDERING EXPORT…";
+  await new Promise((resolve) => requestAnimationFrame(resolve));
   try {
-    applyPatch(parsePatch(await file.text()));
-    elements.audioStatus.textContent = "PATCH LOADED";
+    const stem = patchFileStem();
+    const files = await buildExportFiles(selected, stem);
+    if (files.length === 1) downloadBlob(files[0].blob, files[0].name);
+    else {
+      const entries = await Promise.all(files.map(async (file) => ({
+        name: file.name,
+        data: new Uint8Array(await file.blob.arrayBuffer()),
+      })));
+      downloadBlob(new Blob([zipStore(entries)], { type: "application/zip" }), `${stem}-export.zip`);
+    }
+    elements.audioStatus.textContent = `${files.length} ${files.length === 1 ? "FILE" : "FILES"} EXPORTED`;
+    elements.exportDialog.close("export");
   } catch (error) {
-    elements.audioStatus.textContent = error instanceof Error ? error.message.toUpperCase() : "PATCH ERROR";
+    elements.exportError.textContent = error instanceof Error ? error.message.toUpperCase() : "EXPORT ERROR";
+    elements.exportError.hidden = false;
+    elements.audioStatus.textContent = "EXPORT FAILED";
+  } finally {
+    elements.exportSubmit.disabled = false;
   }
 });
 
+root.addEventListener("input", scheduleSessionSave);
+root.addEventListener("change", scheduleSessionSave);
+window.addEventListener("pagehide", saveSession);
+
 updateOctaveDisplay();
-rebuildGeometry();
+if (!restoreSession()) rebuildGeometry();

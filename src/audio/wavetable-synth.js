@@ -1,4 +1,6 @@
-import { midiNoteFrequency } from "../model/wavetable.js";
+import { midiNoteFrequency } from "../model/wavetable.js?v=0.3.0";
+
+const OCTAVE_GLIDE_SECONDS = 0.02;
 
 export class WavetableInstrument {
   constructor() {
@@ -63,8 +65,22 @@ export class WavetableInstrument {
     gain.gain.linearRampToValueAtTime(0.72, now + attackSeconds);
     oscillator.connect(gain).connect(this.master);
     oscillator.start(now);
-    this.voices.set(key, { oscillator, gain });
+    this.voices.set(key, { oscillator, gain, midiNote });
     return true;
+  }
+
+  transpose(semitones) {
+    if (!this.context || semitones === 0) return;
+    const now = this.context.currentTime;
+    for (const voice of this.voices.values()) {
+      voice.midiNote += semitones;
+      voice.oscillator.frequency.cancelScheduledValues(now);
+      voice.oscillator.frequency.setValueAtTime(voice.oscillator.frequency.value, now);
+      voice.oscillator.frequency.exponentialRampToValueAtTime(
+        midiNoteFrequency(voice.midiNote),
+        now + OCTAVE_GLIDE_SECONDS,
+      );
+    }
   }
 
   noteOff(key, releaseSeconds = 0.25) {

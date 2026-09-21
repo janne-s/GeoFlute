@@ -28,13 +28,26 @@ and decoded locally. Terrain and audio calculations remain local to the browser.
 1. Select or move a map area with `AREA` and wait for the DEM status to be ready.
 2. Set transect direction, bank position, and harmonic limit under `CYCLE`.
 3. Play the on-screen notes or the `A W S E D F T G Y H U J K` keys. `Z` and `X`
-   shift the octave; `HOLD` sustains a note while you reshape the cycle.
+   or the arrows under the keyboard shift the octave, and anything sounding
+   glides with them; `HOLD` sustains a note while you reshape the cycle.
+   `SPACE` starts and stops the preview, which otherwise releases itself after
+   a second and a half.
 4. `SCAN` sweeps the transect across the area, morphing a held note as it moves.
-5. `WAV` exports the whole bank as a wavetable file: mono 16-bit, 256 frames
-   written end to end. The button in the `OUTPUT` heading picks the cycle
-   length: `1024` for Ableton, or `2048` with a `clm ` chunk for Serum, Vital
-   and Bitwig. `SAVE` and `LOAD` write and restore a patch holding the area,
-   the map view and every cycle and scan setting.
+5. `EXPORT` opens the package: two wavetable banks, one 2048-sample cycle with
+   a `clm ` chunk for Serum, Vital and Bitwig and one 1024-sample cycle without
+   a header for Ableton, plus an optional single cycle, the metadata document,
+   and the transect relief as 64 elevations. Each is mono 16-bit, 256 frames
+   written end to end. One selection downloads on its own, several arrive as a
+   ZIP.
+
+The area, map view, and every cycle, scan and envelope setting are kept in the
+browser and restored the next time the page opens; nothing has to be saved for
+that. `SAVE` and `OPEN` are for moving a session somewhere else: to another
+browser or machine, to a colleague, or into more than one file. `OPEN` replaces
+the current session, which is then kept by the browser as usual.
+
+The saved file and the `METADATA` item in the export package are the same
+document, so `OPEN` accepts either.
 
 Turn `NORM` off before exporting if you want the terrain's own relief in the
 file: frame amplitude then follows the transect instead of being levelled, and
@@ -61,6 +74,17 @@ packages need to be installed:
 ```sh
 npm test
 ```
+
+Module URLs carry the release version (`./audio/wav.js?v=0.3.0`) so a deploy
+cannot serve a stale module beside a fresh one. Raise `version` in
+`package.json` for a release and restamp every URL:
+
+```sh
+grep -rlE '\?v=[0-9.]+' src tests index.html | xargs sed -i '' 's/?v=0\.3\.0/?v=0.4.0/g'
+```
+
+`npm test` fails if any URL, or the version reported in exported documents,
+disagrees with `package.json`.
 
 The physically informed infrasound path that GeoFlute used to carry alongside
 the instrument now lives in its own project and is not maintained here.
