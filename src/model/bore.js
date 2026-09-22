@@ -1,4 +1,4 @@
-import { resampleProfile } from "./wavetable.js?v=0.3.0";
+import { resampleProfile } from "./wavetable.js?v=0.4.0";
 
 export const BORE_REFERENCE_RELIEF_METERS = 1_000;
 export const MINIMUM_BORE_SECTIONS = 4;
@@ -15,6 +15,7 @@ export const BORE_DEFAULTS = {
   decay: 0.85,
   tone: 0.89,
   blow: 0.5,
+  width: 0,
 };
 
 export const BORE_RANGES = {
@@ -22,6 +23,7 @@ export const BORE_RANGES = {
   decay: { minimum: 0, maximum: 1 },
   tone: { minimum: 0, maximum: 1 },
   blow: { minimum: 0, maximum: 1 },
+  width: { minimum: 0, maximum: 1 },
 };
 
 const SHORTEST_END_REFLECTION = 0.955;
@@ -47,6 +49,32 @@ export function radiationFromTone(tone) {
 export function jetFromBlow(blow) {
   const bounded = clamp(blow, 0, 1);
   return LOUDEST_JET * bounded * bounded;
+}
+
+/**
+ * The stereo pair straddles the played position by `width` in transect-position
+ * units, so a full width reaches both edges of the selected area and leaves the
+ * scan nothing to move. The centre is pulled in rather than the pair collapsing
+ * at the edges, which would make the image breathe during a scan.
+ * @param {number} position
+ * @param {number} width
+ */
+export function stereoTransectPositions(position, width) {
+  const half = clamp(width, 0, 1);
+  const center = clamp(position, -(1 - half), 1 - half);
+  return { center, left: center - half, right: center + half, separation: 2 * half };
+}
+
+/**
+ * Equal-power blend between breath shared by both channels and breath of their
+ * own. At width zero both bores are driven by the identical signal, so the
+ * voice is mono rather than two decorrelated noise sources that merely happen
+ * to share a shape.
+ * @param {number} width
+ */
+export function stereoNoiseMix(width) {
+  const angle = (clamp(width, 0, 1) * Math.PI) / 2;
+  return { shared: Math.cos(angle), own: Math.sin(angle) };
 }
 
 export function boreSections(periodSamples, radiationCoefficient) {
@@ -228,14 +256,18 @@ export class AutoLeveler {
     this.gain = 1;
   }
 
-  process(sample) {
-    this.meanSquare += this.levelPole * (sample * sample - this.meanSquare);
+  advance(detectorSample) {
+    this.meanSquare += this.levelPole * (detectorSample * detectorSample - this.meanSquare);
     const level = Math.sqrt(this.meanSquare);
     const targetGain = level > this.floorRms
       ? clamp(this.targetRms / level, this.minimumGain, this.maximumGain)
       : this.maximumGain;
     this.gain += this.gainPole * (targetGain - this.gain);
-    return Math.tanh(sample * this.gain);
+    return this.gain;
+  }
+
+  process(sample) {
+    return Math.tanh(sample * this.advance(sample));
   }
 }
 

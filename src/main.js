@@ -1,14 +1,15 @@
-import { downloadBlob, encodeWavetableWav, wavetableWavByteLength, WAVETABLE_FRAME_SAMPLES } from "./audio/wav.js?v=0.3.0";
-import { zipStore } from "./audio/zip.js?v=0.3.0";
-import { WavetableInstrument } from "./audio/wavetable-synth.js?v=0.3.0";
-import { BoreInstrument } from "./audio/bore-synth.js?v=0.3.0";
-import { EXPORT_SUSTAIN_SECONDS, EXPORT_TAIL_SECONDS, renderBoreMultisample } from "./audio/bore-render.js?v=0.3.0";
-import { findPlace } from "./data/place-search.js?v=0.3.0";
-import { loadTerrainGrid } from "./data/terrain-tiles.js?v=0.3.0";
-import { WorldMap } from "./map/world-map.js?v=0.3.0";
-import { multisampleKeyRanges, multisampleNoteList, sfzDocument } from "./model/multisample.js?v=0.3.0";
-import { analysisExtent, areaDimensions, createFoundationTerrain, FOUNDATION_SEED } from "./model/terrain.js?v=0.3.0";
-import { createPatch, createReliefProfile, parsePatch } from "./model/patch.js?v=0.3.0";
+import { downloadBlob, encodeNoteWav, encodeWavetableWav, wavetableWavByteLength, WAVETABLE_FRAME_SAMPLES } from "./audio/wav.js?v=0.4.0";
+import { zipStore } from "./audio/zip.js?v=0.4.0";
+import { WavetableInstrument } from "./audio/wavetable-synth.js?v=0.4.0";
+import { BoreInstrument } from "./audio/bore-synth.js?v=0.4.0";
+import { EXPORT_SUSTAIN_SECONDS, EXPORT_TAIL_SECONDS, renderBoreMultisample } from "./audio/bore-render.js?v=0.4.0";
+import { findPlace } from "./data/place-search.js?v=0.4.0";
+import { loadTerrainGrid } from "./data/terrain-tiles.js?v=0.4.0";
+import { WorldMap } from "./map/world-map.js?v=0.4.0";
+import { multisampleKeyRanges, multisampleNoteList, sfzDocument } from "./model/multisample.js?v=0.4.0";
+import { analysisExtent, areaDimensions, createFoundationTerrain, FOUNDATION_SEED } from "./model/terrain.js?v=0.4.0";
+import { stereoTransectPositions } from "./model/bore.js?v=0.4.0";
+import { createPatch, createReliefProfile, parsePatch } from "./model/patch.js?v=0.4.0";
 import {
   buildTerrainWavetable,
   buildWavetableFrames,
@@ -16,8 +17,10 @@ import {
   midiNoteName,
   resampleProfile,
   terrainProfileBank,
-} from "./model/wavetable.js?v=0.3.0";
-import { drawTerrain, drawWavetable } from "./visual/canvas.js?v=0.3.0";
+  transectProfile,
+  transectSeparationMeters,
+} from "./model/wavetable.js?v=0.4.0";
+import { drawTerrain, drawWavetable } from "./visual/canvas.js?v=0.4.0";
 
 const DEFAULT_SELECTION = {
   west: -61.75,
@@ -148,6 +151,8 @@ root.innerHTML = `
             <input id="bore-tone" type="range" min="0" max="1" step="0.01" value="0.89" />
             <label for="bore-blow">BLOW <output id="bore-blow-value">0.50</output></label>
             <input id="bore-blow" type="range" min="0" max="1" step="0.01" value="0.50" />
+            <label for="bore-width">WIDTH <output id="bore-width-value">MONO</output></label>
+            <input id="bore-width" type="range" min="0" max="1" step="0.01" value="0" />
             <div class="toggle-row">
               <button class="tool" id="bore-temper" type="button" aria-pressed="false">TEMPER</button>
             </div>
@@ -349,6 +354,7 @@ const elements = {
   boreDecay: requiredElement("#bore-decay", HTMLInputElement),
   boreTone: requiredElement("#bore-tone", HTMLInputElement),
   boreBlow: requiredElement("#bore-blow", HTMLInputElement),
+  boreWidth: requiredElement("#bore-width", HTMLInputElement),
   boreTemper: requiredElement("#bore-temper", HTMLButtonElement),
   newArea: requiredElement("#new-area", HTMLButtonElement),
   scanToggle: requiredElement("#scan-toggle", HTMLButtonElement),
@@ -391,6 +397,7 @@ const elements = {
   boreDecayValue: requiredElement("#bore-decay-value", HTMLOutputElement),
   boreToneValue: requiredElement("#bore-tone-value", HTMLOutputElement),
   boreBlowValue: requiredElement("#bore-blow-value", HTMLOutputElement),
+  boreWidthValue: requiredElement("#bore-width-value", HTMLOutputElement),
   octaveValue: requiredElement("#octave-value", HTMLOutputElement),
   transectLength: requiredElement("#transect-length", HTMLElement),
   profileRange: requiredElement("#profile-range", HTMLElement),
@@ -438,7 +445,22 @@ function currentBoreParameters() {
     decay: Number(elements.boreDecay.value),
     tone: Number(elements.boreTone.value),
     blow: Number(elements.boreBlow.value),
+    width: Number(elements.boreWidth.value),
     temper: isPressed(elements.boreTemper),
+  };
+}
+
+let boreProfiles = { left: null, right: null, separationMeters: 0 };
+
+function boreReliefProfiles(parameters) {
+  const width = Number(elements.boreWidth.value);
+  if (width <= 0) return { left: wavetable.elevationMeters, right: null, separationMeters: 0 };
+  const pointCount = wavetable.elevationMeters.length;
+  const spread = stereoTransectPositions(parameters.position, width);
+  return {
+    left: transectProfile(terrain, parameters.bearingDeg, spread.left, pointCount).elevationMeters,
+    right: transectProfile(terrain, parameters.bearingDeg, spread.right, pointCount).elevationMeters,
+    separationMeters: transectSeparationMeters(terrain, parameters.bearingDeg, spread.separation),
   };
 }
 const scanClock = new Worker(URL.createObjectURL(new Blob([
@@ -488,7 +510,7 @@ function currentWavetableParameters() {
 }
 
 function noteStatusText(midiNote) {
-  if (activeVoice === "bore" && boreInstrument.isFlat) return "SILENT / NO RELIEF ON TRANSECT";
+  if (activeVoice === "bore" && boreInstrument.silent) return "SILENT / NO RELIEF ON TRANSECT";
   return `${midiNoteFrequency(midiNote).toFixed(2)} HZ`;
 }
 
@@ -574,6 +596,7 @@ function updateBoreReadouts() {
   elements.boreDecayValue.value = Number(elements.boreDecay.value).toFixed(2);
   elements.boreToneValue.value = Number(elements.boreTone.value).toFixed(2);
   elements.boreBlowValue.value = Number(elements.boreBlow.value).toFixed(2);
+  updateWidthReadout();
 }
 
 function setVoice(voice) {
@@ -622,6 +645,12 @@ function soundingWavetable(target) {
   return { ...target, ...scanSmoothing };
 }
 
+function updateWidthReadout() {
+  elements.boreWidthValue.value = Number(elements.boreWidth.value) > 0
+    ? `${(boreProfiles.separationMeters / 1_000).toFixed(2)} KM`
+    : "MONO";
+}
+
 function updateMapTransect() {
   const parameters = currentWavetableParameters();
   worldMap.setTransect({ bearingDeg: parameters.bearingDeg, position: parameters.position });
@@ -639,7 +668,9 @@ function updateWavetable() {
   wavetable = buildTerrainWavetable(terrain, parameters);
   const sounding = soundingWavetable(wavetable);
   wavetableInstrument.setWavetable(sounding);
-  boreInstrument.setRelief(wavetable.elevationMeters);
+  boreProfiles = boreReliefProfiles(parameters);
+  boreInstrument.setRelief(boreProfiles.left, boreProfiles.right);
+  updateWidthReadout();
   if (activeVoice === "bore" && boreInstrument.voices.has("hold")) {
     elements.audioStatus.textContent = noteStatusText(boreInstrument.voices.get("hold").midiNote);
   }
@@ -737,6 +768,8 @@ function patchDocument() {
     boreDecay: Number(elements.boreDecay.value),
     boreTone: Number(elements.boreTone.value),
     boreBlow: Number(elements.boreBlow.value),
+    boreWidth: Number(elements.boreWidth.value),
+    boreSeparationMeters: boreProfiles.separationMeters,
     boreTemper: isPressed(elements.boreTemper),
     seed: currentSeed,
   });
@@ -759,6 +792,7 @@ function applyPatch(patch) {
   elements.boreDecay.value = String(patch.boreDecay);
   elements.boreTone.value = String(patch.boreTone);
   elements.boreBlow.value = String(patch.boreBlow);
+  elements.boreWidth.value = String(patch.boreWidth);
   setPressed(elements.boreTemper, patch.boreTemper);
   setPressed(elements.mirror, patch.seamMethod === "forward-reverse-mirror");
   setPressed(elements.normalize, patch.normalized);
@@ -861,6 +895,11 @@ for (const input of [elements.boreDepth, elements.boreDecay, elements.boreTone, 
     scheduleSessionSave();
   });
 }
+elements.boreWidth.addEventListener("input", () => {
+  boreInstrument.setParameters(currentBoreParameters());
+  updateWavetable();
+  scheduleSessionSave();
+});
 elements.boreTemper.addEventListener("click", () => {
   setPressed(elements.boreTemper, !isPressed(elements.boreTemper));
   boreInstrument.setParameters(currentBoreParameters());
@@ -1130,7 +1169,10 @@ function exportItemSizes() {
     }),
     ableton: wavetableWavByteLength(EXPORT_FRAME_COUNT * ABLETON_FRAME_SAMPLES, { declareCycle: false }),
     cycle: wavetableWavByteLength(WAVETABLE_FRAME_SAMPLES, { declareCycle: false }),
-    multisample: notes.length * wavetableWavByteLength(noteSamples, { declareCycle: false }),
+    multisample: notes.length * wavetableWavByteLength(noteSamples, {
+      declareCycle: false,
+      channels: boreProfiles.right ? 2 : 1,
+    }),
     sfz: textByteLength(boreExportSfz(stem)),
     metadata: documentByteLength(patchDocument()),
     relief: documentByteLength(reliefDocument()),
@@ -1147,7 +1189,7 @@ function updateExportSummary() {
   for (const [key, bytes] of Object.entries(sizes)) {
     requiredElement(`#export-size-${key}`, HTMLElement).textContent = formatBytes(bytes);
   }
-  elements.exportParamsMultisample.textContent = `${boreExportNotes().length} NOTES`;
+  elements.exportParamsMultisample.textContent = `${boreExportNotes().length} NOTES · ${boreProfiles.right ? "STEREO" : "MONO"}`;
   const selected = exportSelection();
   const total = [...selected].reduce((sum, key) => sum + sizes[key], 0);
   elements.exportSummary.textContent = selected.size
@@ -1192,14 +1234,14 @@ function documentFile(name, patch) {
 async function multisampleFiles(stem) {
   const notes = boreExportNotes();
   const fileNames = boreExportFileNames(stem, notes);
-  const renders = await renderBoreMultisample(wavetable.elevationMeters, notes, currentBoreParameters(), {
+  const renders = await renderBoreMultisample(boreProfiles, notes, currentBoreParameters(), {
     sampleRate: AUDIO_SAMPLE_RATE,
     attackSeconds: Number(elements.attack.value),
     releaseSeconds: Number(elements.release.value),
   });
   return renders.map((render, index) => ({
     name: fileNames[index],
-    blob: encodeWavetableWav(render.samples, AUDIO_SAMPLE_RATE, { declareCycle: false }),
+    blob: encodeNoteWav(render.channels, AUDIO_SAMPLE_RATE),
   }));
 }
 

@@ -1,13 +1,13 @@
-import { BORE_DEFAULTS, BORE_RANGES } from "./bore.js?v=0.3.0";
-import { SEAM_METHODS } from "./wavetable.js?v=0.3.0";
+import { BORE_DEFAULTS, BORE_RANGES } from "./bore.js?v=0.4.0";
+import { SEAM_METHODS } from "./wavetable.js?v=0.4.0";
 
 export const PATCH_FORMAT = "geoflute-patch";
-export const PATCH_SCHEMA_VERSION = 2;
+export const PATCH_SCHEMA_VERSION = 3;
 export const VOICES = ["wavetable", "bore"];
 export const RELIEF_FORMAT = "geoflute-relief";
 export const RELIEF_SCHEMA_VERSION = 1;
 
-export const APPLICATION_VERSION = "0.3.0";
+export const APPLICATION_VERSION = "0.4.0";
 
 const RANGES = {
   bearingDeg: { minimum: 0, maximum: 359, fallback: 90 },
@@ -24,6 +24,7 @@ const RANGES = {
   boreDecay: { ...BORE_RANGES.decay, fallback: BORE_DEFAULTS.decay },
   boreTone: { ...BORE_RANGES.tone, fallback: BORE_DEFAULTS.tone },
   boreBlow: { ...BORE_RANGES.blow, fallback: BORE_DEFAULTS.blow },
+  boreWidth: { ...BORE_RANGES.width, fallback: BORE_DEFAULTS.width },
 };
 
 function bounded(value, range) {
@@ -76,6 +77,9 @@ export function createPatch(state) {
       decay: state.boreDecay,
       tone: state.boreTone,
       blow: state.boreBlow,
+      width: state.boreWidth,
+      stereoSeparationMeters: state.boreSeparationMeters,
+      channels: state.boreWidth > 0 ? 2 : 1,
       temper: state.boreTemper,
     },
     scan: {
@@ -173,6 +177,7 @@ export function parsePatch(text) {
     boreDecay: bounded(bore.decay, RANGES.boreDecay),
     boreTone: bounded(bore.tone, RANGES.boreTone),
     boreBlow: bounded(bore.blow, RANGES.boreBlow),
+    boreWidth: bounded(bore.width, RANGES.boreWidth),
     boreTemper: Boolean(bore.temper),
   };
 }

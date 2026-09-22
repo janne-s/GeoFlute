@@ -3,12 +3,12 @@ import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, it } from "node:test";
-import { encodeWavetableWav, wavetableWavByteLength, WAVETABLE_FRAME_SAMPLES } from "../src/audio/wav.js?v=0.3.0";
-import { zipStore } from "../src/audio/zip.js?v=0.3.0";
-import { WavetableInstrument } from "../src/audio/wavetable-synth.js?v=0.3.0";
-import { APPLICATION_VERSION, createPatch, createReliefProfile, parsePatch } from "../src/model/patch.js?v=0.3.0";
-import { isValidCoordinate, parseCoordinates } from "../src/model/coordinates.js?v=0.3.0";
-import { createMulberry32 } from "../src/model/prng.js?v=0.3.0";
+import { encodeNoteWav, encodeWavetableWav, wavetableWavByteLength, WAVETABLE_FRAME_SAMPLES } from "../src/audio/wav.js?v=0.4.0";
+import { zipStore } from "../src/audio/zip.js?v=0.4.0";
+import { WavetableInstrument } from "../src/audio/wavetable-synth.js?v=0.4.0";
+import { APPLICATION_VERSION, createPatch, createReliefProfile, parsePatch } from "../src/model/patch.js?v=0.4.0";
+import { isValidCoordinate, parseCoordinates } from "../src/model/coordinates.js?v=0.4.0";
+import { createMulberry32 } from "../src/model/prng.js?v=0.4.0";
 import {
   analysisExtent,
   areaDimensions,
@@ -16,10 +16,11 @@ import {
   createFoundationTerrain,
   createSinusoidalRidge,
   MINIMUM_EXTENT_METERS,
-} from "../src/model/terrain.js?v=0.3.0";
+} from "../src/model/terrain.js?v=0.4.0";
 import {
   AutoLeveler,
   BoreLadder,
+  BreathNoise,
   boreFromProfile,
   boreImpulseResponse,
   boreSections,
@@ -28,12 +29,14 @@ import {
   MAXIMUM_REFLECTION,
   radiationFromTone,
   reliefIsFlat,
+  stereoNoiseMix,
+  stereoTransectPositions,
   AGC_TARGET_RMS,
   BORE_DEFAULTS,
   TEMPER_SEARCH_SEMITONES,
-} from "../src/model/bore.js?v=0.3.0";
-import { BoreInstrument } from "../src/audio/bore-synth.js?v=0.3.0";
-import { multisampleKeyRanges, multisampleNoteList, sfzDocument } from "../src/model/multisample.js?v=0.3.0";
+} from "../src/model/bore.js?v=0.4.0";
+import { BoreInstrument } from "../src/audio/bore-synth.js?v=0.4.0";
+import { multisampleKeyRanges, multisampleNoteList, sfzDocument } from "../src/model/multisample.js?v=0.4.0";
 import {
   buildTerrainWavetable,
   buildWavetableFrames,
@@ -41,8 +44,11 @@ import {
   midiNoteFrequency,
   renderWavetableNote,
   resampleProfile,
+  transectProfile,
+  transectSeparationMeters,
+  MAX_TRANSECT_POSITION,
   WAVETABLE_LENGTH,
-} from "../src/model/wavetable.js?v=0.3.0";
+} from "../src/model/wavetable.js?v=0.4.0";
 
 describe("deterministic model foundation", () => {
   it("repeats the same pseudo-random sequence for an identical seed", () => {
@@ -741,5 +747,208 @@ describe("multisample note layout", () => {
     assert.equal((document.match(/<region>/g) ?? []).length, notes.length);
     assert.match(document, /sample=bore-60\.wav/);
     assert.match(document, /pitch_keycenter=60/);
+  });
+});
+
+describe("stereo bore", () => {
+  const AREA = { widthMeters: 16_000, heightMeters: 16_000 };
+
+  function shapedTerrain() {
+    return createFoundationTerrain({ size: 64, widthMeters: 16_000, heightMeters: 16_000 });
+  }
+
+  function profileAt(terrain, position) {
+    return transectProfile(terrain, 90, position, 512).elevationMeters;
+  }
+
+  function stereoInstrument(left, right, width = 0.5) {
+    const instrument = new BoreInstrument();
+    instrument.setParameters({ width });
+    instrument.setRelief(left, right);
+    return instrument;
+  }
+
+  it("collapses to one transect at width zero and reaches both edges at full width", () => {
+    const mono = stereoTransectPositions(0.3, 0);
+    assert.equal(mono.left, mono.right);
+    assert.equal(mono.separation, 0);
+
+    const full = stereoTransectPositions(0.8, 1);
+    assert.equal(full.center, 0);
+    assert.equal(full.left, -1);
+    assert.equal(full.right, 1);
+  });
+
+  it("pulls the centre in instead of letting the pair collapse against an edge", () => {
+    const spread = stereoTransectPositions(0.95, 0.25);
+    assert.equal(spread.center, 0.75);
+    assert.equal(spread.left, 0.5);
+    assert.equal(spread.right, 1);
+    assert.equal(spread.separation, 0.5);
+  });
+
+  it("shares all of the breath at width zero and blends it with equal power above", () => {
+    const mono = stereoNoiseMix(0);
+    assert.equal(mono.shared, 1);
+    assert.equal(mono.own, 0);
+    assert.equal(stereoNoiseMix(1).own, 1);
+    for (const width of [0, 0.2, 0.5, 0.8, 1]) {
+      const mix = stereoNoiseMix(width);
+      assert.ok(Math.abs(mix.shared ** 2 + mix.own ** 2 - 1) < 1e-12);
+    }
+  });
+
+  it("reports the pair's separation as a distance across the selected area", () => {
+    const full = transectSeparationMeters(AREA, 90, 2);
+    assert.ok(Math.abs(full - 2 * MAX_TRANSECT_POSITION * (AREA.heightMeters / 2)) < 1e-6);
+    assert.equal(transectSeparationMeters(AREA, 90, 0), 0);
+    assert.ok(transectSeparationMeters(AREA, 90, 1) < full);
+  });
+
+  it("extracts the same profile as the wavetable path takes for the same transect", () => {
+    const terrain = shapedTerrain();
+    const wavetable = buildTerrainWavetable(terrain, { bearingDeg: 90, position: 0.25 });
+    const direct = transectProfile(terrain, 90, 0.25, wavetable.elevationMeters.length);
+    assert.deepEqual(Array.from(direct.elevationMeters), Array.from(wavetable.elevationMeters));
+  });
+
+  it("builds a different bore for each channel of a stereo pair", () => {
+    const terrain = shapedTerrain();
+    const spread = stereoTransectPositions(0, 0.5);
+    const instrument = stereoInstrument(profileAt(terrain, spread.left), profileAt(terrain, spread.right));
+    assert.equal(instrument.stereo, true);
+
+    const bore = instrument.boreForNote(60);
+    assert.equal(bore.width, 0.5);
+    assert.ok(bore.rightCoefficients);
+    assert.notDeepEqual(Array.from(bore.coefficients), Array.from(bore.rightCoefficients));
+  });
+
+  it("sends a single bore while the width is zero", () => {
+    const instrument = new BoreInstrument();
+    instrument.setRelief(profileAt(shapedTerrain(), 0));
+    assert.equal(instrument.stereo, false);
+
+    const bore = instrument.boreForNote(60);
+    assert.equal(bore.width, 0);
+    assert.equal(bore.rightCoefficients, undefined);
+  });
+
+  it("goes silent only once both channels have run onto flat ground", () => {
+    const flat = profileAt(createFlatTerrain(32, 16_000), 0);
+    const shaped = profileAt(shapedTerrain(), 0);
+    const instrument = stereoInstrument(flat, shaped);
+    assert.equal(instrument.isFlat, true);
+    assert.equal(instrument.rightIsFlat, false);
+    assert.equal(instrument.silent, false);
+
+    instrument.setRelief(flat, flat);
+    assert.equal(instrument.silent, true);
+  });
+
+  it("drives both ladders identically when the breath is fully shared", () => {
+    const bore = boreFromProfile(profileAt(shapedTerrain(), 0), { sections: 48, depth: 2 });
+    const mix = stereoNoiseMix(0);
+    const first = new BoreLadder();
+    const second = new BoreLadder();
+    first.setBore(bore.coefficients, 44_100 / 220);
+    second.setBore(bore.coefficients, 44_100 / 220);
+    const breath = new BreathNoise(0x1234_5678);
+    for (let index = 0; index < 4_096; index += 1) {
+      const excitation = breath.next() * mix.shared;
+      assert.equal(first.process(excitation), second.process(excitation));
+    }
+  });
+
+  it("keeps a stereo pair bounded and distinct under one linked leveler", () => {
+    const terrain = shapedTerrain();
+    const spread = stereoTransectPositions(0, 0.6);
+    const width = 0.6;
+    const mix = stereoNoiseMix(width);
+    const period = 44_100 / 220;
+    const leftLadder = new BoreLadder();
+    const rightLadder = new BoreLadder();
+    leftLadder.setBore(boreFromProfile(profileAt(terrain, spread.left), { sections: 48, depth: 2 }).coefficients, period);
+    rightLadder.setBore(boreFromProfile(profileAt(terrain, spread.right), { sections: 48, depth: 2 }).coefficients, period);
+    const sharedBreath = new BreathNoise(0x9e37_79b9);
+    const leftBreath = new BreathNoise(0x5bf0_3635);
+    const rightBreath = new BreathNoise(0x27d4_eb2f);
+    const leveler = new AutoLeveler(44_100);
+
+    let largest = 0;
+    let difference = 0;
+    for (let index = 0; index < 44_100; index += 1) {
+      const shared = sharedBreath.next();
+      const leftPressure = leftLadder.process((shared * mix.shared + leftBreath.next() * mix.own) * 0.02);
+      const rightPressure = rightLadder.process((shared * mix.shared + rightBreath.next() * mix.own) * 0.02);
+      const gain = leveler.advance((leftPressure + rightPressure) * 0.5);
+      const left = Math.tanh(leftPressure * gain);
+      const right = Math.tanh(rightPressure * gain);
+      assert.ok(Number.isFinite(left) && Number.isFinite(right));
+      largest = Math.max(largest, Math.abs(left), Math.abs(right));
+      if (index >= 22_050) difference += Math.abs(left - right);
+    }
+    assert.ok(largest <= 1);
+    assert.ok(difference / 22_050 > 0.01);
+  });
+
+  it("writes a rendered note as an interleaved stereo file", async () => {
+    const left = Float32Array.from([1, 0, -0.5]);
+    const right = Float32Array.from([-1, 0, 0.5]);
+    const blob = encodeNoteWav([left, right], 44_100);
+    assert.equal(blob.size, wavetableWavByteLength(3, { declareCycle: false, channels: 2 }));
+
+    const buffer = await blob.arrayBuffer();
+    const view = new DataView(buffer);
+    const text = (offset, length) => String.fromCharCode(...new Uint8Array(buffer, offset, length));
+
+    assert.equal(view.getUint16(22, true), 2);
+    assert.equal(view.getUint32(28, true), 44_100 * 4);
+    assert.equal(view.getUint16(32, true), 4);
+    assert.equal(text(36, 4), "data");
+    assert.equal(view.getUint32(40, true), 3 * 4);
+    assert.equal(view.getInt16(44, true), 32_767);
+    assert.equal(view.getInt16(46, true), -32_767);
+    assert.equal(view.getInt16(52, true), Math.round(-0.5 * 32_767));
+    assert.equal(view.getInt16(54, true), Math.round(0.5 * 32_767));
+  });
+
+  it("keeps a mono note file mono", () => {
+    const samples = Float32Array.from([0.25, -0.25]);
+    assert.equal(
+      encodeNoteWav([samples], 44_100).size,
+      wavetableWavByteLength(2, { declareCycle: false }),
+    );
+  });
+
+  it("carries the width and its separation into the patch document", () => {
+    const patch = createPatch({
+      selection: { west: -61.75, south: 15.96, east: -61.56, north: 16.16 },
+      view: { longitude: -61.45, latitude: 16.2, zoom: 9 },
+      voice: "bore",
+      boreDepth: 2,
+      boreDecay: 0.85,
+      boreTone: 0.89,
+      boreBlow: 0.5,
+      boreWidth: 0.4,
+      boreSeparationMeters: 6_144,
+      boreTemper: true,
+    });
+    assert.equal(patch.bore.width, 0.4);
+    assert.equal(patch.bore.stereoSeparationMeters, 6_144);
+    assert.equal(patch.bore.channels, 2);
+
+    const restored = parsePatch(JSON.stringify(patch));
+    assert.equal(restored.boreWidth, 0.4);
+    assert.equal(restored.voice, "bore");
+  });
+
+  it("falls back to a mono width when the stored one is unusable", () => {
+    const patch = createPatch({
+      selection: { west: -61.75, south: 15.96, east: -61.56, north: 16.16 },
+      view: { longitude: -61.45, latitude: 16.2, zoom: 9 },
+    });
+    patch.bore.width = "wide";
+    assert.equal(parsePatch(JSON.stringify(patch)).boreWidth, BORE_DEFAULTS.width);
   });
 });

@@ -3,7 +3,8 @@ export const PROFILE_POINT_COUNT = WAVETABLE_LENGTH / 2 + 1;
 export const DEFAULT_HARMONIC_LIMIT = 64;
 export const SEAM_METHODS = ["forward-reverse-mirror", "direct-profile"];
 
-const MAX_POSITION = 0.96;
+export const MAX_TRANSECT_POSITION = 0.96;
+const MAX_POSITION = MAX_TRANSECT_POSITION;
 const WAVETABLE_PEAK = 0.92;
 const REFERENCE_RELIEF_METERS = 1_000;
 const MINIMUM_NORMALIZED_RELIEF_METERS = 20;
@@ -92,6 +93,43 @@ export function clippedTransect(extent, bearingDeg, position) {
     bearingDeg: ((bearingDeg % 360) + 360) % 360,
     position: clamp(position, -1, 1),
     lengthMeters: Math.max(0, maximumT - minimumT),
+  };
+}
+
+/**
+ * Half the extent measured along the transect normal: the distance one unit of
+ * `position` travels before `MAX_POSITION` bounds it.
+ * @param {{ widthMeters: number, heightMeters: number }} extent
+ * @param {number} bearingDeg
+ */
+export function transectSupportMeters(extent, bearingDeg) {
+  const radians = (bearingDeg * Math.PI) / 180;
+  const normalEast = -Math.cos(radians);
+  const normalNorth = Math.sin(radians);
+  return Math.abs(normalEast) * (extent.widthMeters / 2)
+    + Math.abs(normalNorth) * (extent.heightMeters / 2);
+}
+
+/**
+ * @param {{ widthMeters: number, heightMeters: number }} extent
+ * @param {number} bearingDeg
+ * @param {number} positionDelta
+ */
+export function transectSeparationMeters(extent, bearingDeg, positionDelta) {
+  return Math.abs(positionDelta) * MAX_POSITION * transectSupportMeters(extent, bearingDeg);
+}
+
+/**
+ * @param {import("./types.js").TerrainGrid} terrain
+ * @param {number} bearingDeg
+ * @param {number} position
+ * @param {number} pointCount
+ */
+export function transectProfile(terrain, bearingDeg, position, pointCount) {
+  const transect = clippedTransect(terrain, bearingDeg, position);
+  return {
+    transect,
+    elevationMeters: extractProfile(terrain, transect, Math.max(2, Math.round(pointCount))),
   };
 }
 

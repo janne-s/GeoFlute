@@ -1,4 +1,4 @@
-import { midiNoteFrequency } from "../model/wavetable.js?v=0.3.0";
+import { midiNoteFrequency } from "../model/wavetable.js?v=0.4.0";
 
 const OCTAVE_GLIDE_SECONDS = 0.02;
 

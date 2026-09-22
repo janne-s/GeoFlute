@@ -30,7 +30,8 @@ resonating body rather than the sample.
 
 **EXPORT** opens a package. The WAVE voice writes two wavetable banks, one in
 each of the two cycle lengths in common use, with an optional single cycle
-beside them. The BORE voice writes a multisampled instrument and its key map.
+beside them. The BORE voice writes a multisampled instrument and its key map, in stereo
+whenever WIDTH is above MONO.
 Either voice can add the metadata document and the transect relief. Each item
 names the hosts it suits and its size before anything is rendered. One
 selection downloads on its own, several arrive as a ZIP.
@@ -73,6 +74,10 @@ the same document, so **OPEN** accepts either.
 - **DECAY** — Sets how long the bore rings.
 - **TONE** — Opens or darkens the bore's radiating end.
 - **BLOW** — Sets the strength of the breath exciting the bore.
+- **WIDTH** — Separates the bore into a stereo pair of parallel transects, and
+  reads out the ground distance between them. At MONO both channels are one
+  transect driven by one breath; raising it moves the two apart across the area
+  until they reach its edges, so the stereo image is a distance on the map.
 - **TEMPER** — Tunes the bore to the played note, instead of letting its own
   resonance pull the pitch.
 - **SCAN** — Sweeps the transect across the area under a held note.

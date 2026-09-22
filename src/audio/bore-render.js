@@ -1,49 +1,73 @@
-import { midiNoteFrequency } from "../model/wavetable.js?v=0.3.0";
-import { boreFromProfile, boreSections, boreTuningOffsetSemitones, radiationFromTone } from "../model/bore.js?v=0.3.0";
+import { midiNoteFrequency } from "../model/wavetable.js?v=0.4.0";
+import { boreFromProfile, boreSections, boreTuningOffsetSemitones, radiationFromTone } from "../model/bore.js?v=0.4.0";
 
-const WORKLET_URL = new URL("./bore-worklet.js?v=0.3.0", import.meta.url);
+const WORKLET_URL = new URL("./bore-worklet.js?v=0.4.0", import.meta.url);
 const VOICE_PEAK = 0.85;
 export const EXPORT_SUSTAIN_SECONDS = 2;
 export const EXPORT_TAIL_SECONDS = 1;
 
-export async function renderBoreMultisample(elevationMeters, midiNotes, parameters, options = {}) {
+/**
+ * @param {{ left: Float32Array, right: Float32Array | null }} profiles
+ * @param {number[]} midiNotes
+ * @param {{ depth: number, decay: number, tone: number, blow: number, width: number, temper: boolean }} parameters
+ */
+export async function renderBoreMultisample(profiles, midiNotes, parameters, options = {}) {
   const sampleRate = options.sampleRate ?? 44_100;
   const attackSeconds = options.attackSeconds ?? 0.02;
   const releaseSeconds = options.releaseSeconds ?? 0.3;
-  const temperOffsetSemitones = parameters.temper
+  const stereo = Boolean(profiles.right) && parameters.width > 0;
+  const measure = (elevationMeters) => (parameters.temper
     ? boreTuningOffsetSemitones(elevationMeters, {
       sampleRate,
       depth: parameters.depth,
       tone: parameters.tone,
       decay: parameters.decay,
     })
-    : 0;
+    : 0);
+  const offsets = { left: measure(profiles.left) };
+  offsets.right = stereo ? measure(profiles.right) : offsets.left;
   const renders = [];
   for (const midiNote of midiNotes) {
     renders.push({
       midiNote,
-      samples: await renderNote(elevationMeters, midiNote, parameters, temperOffsetSemitones, {
+      channels: await renderNote(profiles, midiNote, parameters, offsets, {
         sampleRate,
         attackSeconds,
         releaseSeconds,
+        stereo,
       }),
     });
   }
   return renders;
 }
 
-async function renderNote(elevationMeters, midiNote, parameters, temperOffsetSemitones, options) {
-  const { sampleRate, attackSeconds, releaseSeconds } = options;
+function ladderForProfile(elevationMeters, naivePeriodSamples, parameters, offsetSemitones) {
+  const sections = boreSections(naivePeriodSamples, radiationFromTone(parameters.tone));
+  const bore = boreFromProfile(elevationMeters, { sections, depth: parameters.depth });
+  return {
+    coefficients: bore.coefficients,
+    periodSamples: offsetSemitones
+      ? naivePeriodSamples * 2 ** (offsetSemitones / 12)
+      : naivePeriodSamples,
+  };
+}
+
+async function renderNote(profiles, midiNote, parameters, offsets, options) {
+  const { sampleRate, attackSeconds, releaseSeconds, stereo } = options;
   const totalSeconds = EXPORT_SUSTAIN_SECONDS + releaseSeconds + EXPORT_TAIL_SECONDS;
-  const context = new OfflineAudioContext(1, Math.ceil(totalSeconds * sampleRate), sampleRate);
+  const channelCount = stereo ? 2 : 1;
+  const context = new OfflineAudioContext(
+    channelCount,
+    Math.ceil(totalSeconds * sampleRate),
+    sampleRate,
+  );
   await context.audioWorklet.addModule(WORKLET_URL);
 
   const naivePeriodSamples = sampleRate / midiNoteFrequency(midiNote);
-  const sections = boreSections(naivePeriodSamples, radiationFromTone(parameters.tone));
-  const bore = boreFromProfile(elevationMeters, { sections, depth: parameters.depth });
-  const periodSamples = temperOffsetSemitones
-    ? naivePeriodSamples * 2 ** (temperOffsetSemitones / 12)
-    : naivePeriodSamples;
+  const left = ladderForProfile(profiles.left, naivePeriodSamples, parameters, offsets.left);
+  const right = stereo
+    ? ladderForProfile(profiles.right, naivePeriodSamples, parameters, offsets.right)
+    : null;
 
   const master = context.createGain();
   const highPass = context.createBiquadFilter();
@@ -81,5 +105,5 @@ async function renderNote(elevationMeters, midiNote, parameters, temperOffsetSem
   node.connect(envelope).connect(master);
 
   const buffer = await context.startRendering();
-  return buffer.getChannelData(0);
+  return Array.from({ length: channelCount }, (unused, channel) => buffer.getChannelData(channel));
 }
