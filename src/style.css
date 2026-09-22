@@ -547,6 +547,10 @@ select {
   color: var(--text);
 }
 
+.export-dialog:focus {
+  outline: none;
+}
+
 .export-dialog::backdrop {
   background: rgb(0 0 0 / 0.72);
 }
@@ -567,9 +571,12 @@ select {
 
 .export-items label {
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto auto;
+  grid-template-columns: auto minmax(0, 1fr) auto 52px;
+  grid-template-areas:
+    "check name   params size"
+    "check target target target";
   align-items: baseline;
-  gap: 4px 9px;
+  gap: 3px 9px;
   margin: 0;
   padding: 7px 0;
   border-top: 1px dotted var(--line);
@@ -582,23 +589,26 @@ select {
 }
 
 .export-items input {
-  grid-row: span 2;
+  grid-area: check;
   align-self: center;
   margin: 0;
   accent-color: var(--accent);
 }
 
 .export-item-name {
+  grid-area: name;
   color: var(--text);
   letter-spacing: 0.04em;
 }
 
 .export-item-size {
+  grid-area: size;
   color: var(--muted);
   text-align: right;
 }
 
 .export-item-params {
+  grid-area: params;
   color: var(--muted);
   font-size: 9px;
   letter-spacing: 0.04em;
@@ -606,7 +616,7 @@ select {
 }
 
 .export-item-target {
-  grid-column: 2 / 5;
+  grid-area: target;
   color: var(--accent);
   font-size: 9px;
   letter-spacing: 0.04em;

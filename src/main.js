@@ -183,7 +183,7 @@ root.innerHTML = `
       </div>
     </section>
 
-    <dialog id="export-dialog" class="export-dialog" aria-labelledby="export-title">
+    <dialog id="export-dialog" class="export-dialog" tabindex="-1" aria-labelledby="export-title">
       <form id="export-form" method="dialog">
         <h2 id="export-title">EXPORT</h2>
         <ul class="export-items">
@@ -191,45 +191,45 @@ root.innerHTML = `
             <label>
               <input type="checkbox" name="export-item" value="serum" checked />
               <span class="export-item-name">WAVETABLE BANK</span>
-              <span class="export-item-target">SERUM · VITAL · BITWIG</span>
               <span class="export-item-params">${EXPORT_FRAME_COUNT} × ${WAVETABLE_FRAME_SAMPLES} · CLM</span>
               <span class="export-item-size" id="export-size-serum"></span>
+              <span class="export-item-target">SERUM · VITAL · BITWIG</span>
             </label>
           </li>
           <li>
             <label>
               <input type="checkbox" name="export-item" value="ableton" checked />
               <span class="export-item-name">WAVETABLE BANK</span>
-              <span class="export-item-target">ABLETON</span>
               <span class="export-item-params">${EXPORT_FRAME_COUNT} × ${ABLETON_FRAME_SAMPLES}</span>
               <span class="export-item-size" id="export-size-ableton"></span>
+              <span class="export-item-target">ABLETON</span>
             </label>
           </li>
           <li>
             <label>
               <input type="checkbox" name="export-item" value="cycle" />
               <span class="export-item-name">SINGLE CYCLE</span>
-              <span class="export-item-target">SAMPLER · BUFFER~</span>
               <span class="export-item-params">1 × ${WAVETABLE_FRAME_SAMPLES}</span>
               <span class="export-item-size" id="export-size-cycle"></span>
+              <span class="export-item-target">SAMPLER · BUFFER~</span>
             </label>
           </li>
           <li>
             <label>
               <input type="checkbox" name="export-item" value="metadata" checked />
               <span class="export-item-name">METADATA</span>
-              <span class="export-item-target">BOUNDS · DEM · SETTINGS · PROVENANCE</span>
               <span class="export-item-params">JSON</span>
               <span class="export-item-size" id="export-size-metadata"></span>
+              <span class="export-item-target">BOUNDS · DEM · SETTINGS · PROVENANCE</span>
             </label>
           </li>
           <li>
             <label>
               <input type="checkbox" name="export-item" value="relief" />
               <span class="export-item-name">RELIEF PROFILE</span>
-              <span class="export-item-target">JSON</span>
               <span class="export-item-params">${RELIEF_SECTIONS} × FLOAT</span>
               <span class="export-item-size" id="export-size-relief"></span>
+              <span class="export-item-target">JSON</span>
             </label>
           </li>
         </ul>
@@ -988,6 +988,7 @@ elements.openExport.addEventListener("click", () => {
   elements.exportError.hidden = true;
   updateExportSummary();
   elements.exportDialog.showModal();
+  elements.exportDialog.focus({ preventScroll: true });
 });
 
 elements.exportForm.addEventListener("change", updateExportSummary);
