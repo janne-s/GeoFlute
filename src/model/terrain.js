@@ -3,6 +3,25 @@ import { createMulberry32 } from "./prng.js?v=0.3.0";
 export const FOUNDATION_GRID_SIZE = 64;
 export const FOUNDATION_EXTENT_METERS = 20_000;
 export const FOUNDATION_SEED = 0x47554c46;
+const EARTH_RADIUS_METERS = 6_371_008.8;
+export const MINIMUM_EXTENT_METERS = 500;
+
+/** @param {{ west: number, south: number, east: number, north: number }} bounds */
+export function areaDimensions(bounds) {
+  const middleLatitudeRadians = ((bounds.north + bounds.south) * Math.PI) / 360;
+  const width = EARTH_RADIUS_METERS * Math.cos(middleLatitudeRadians) * ((bounds.east - bounds.west) * Math.PI) / 180;
+  const height = EARTH_RADIUS_METERS * ((bounds.north - bounds.south) * Math.PI) / 180;
+  return { widthMeters: Math.abs(width), heightMeters: Math.abs(height) };
+}
+
+/** @param {{ west: number, south: number, east: number, north: number }} bounds */
+export function analysisExtent(bounds) {
+  const dimensions = areaDimensions(bounds);
+  return {
+    widthMeters: Math.max(MINIMUM_EXTENT_METERS, dimensions.widthMeters),
+    heightMeters: Math.max(MINIMUM_EXTENT_METERS, dimensions.heightMeters),
+  };
+}
 
 /**
  * Deterministic volcanic massif used until a redistributable DEM is selected.

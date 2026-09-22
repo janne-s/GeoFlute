@@ -3,10 +3,11 @@ import { zipStore } from "./audio/zip.js?v=0.3.0";
 import { WavetableInstrument } from "./audio/wavetable-synth.js?v=0.3.0";
 import { BoreInstrument } from "./audio/bore-synth.js?v=0.3.0";
 import { EXPORT_SUSTAIN_SECONDS, EXPORT_TAIL_SECONDS, renderBoreMultisample } from "./audio/bore-render.js?v=0.3.0";
+import { findPlace } from "./data/place-search.js?v=0.3.0";
 import { loadTerrainGrid } from "./data/terrain-tiles.js?v=0.3.0";
 import { WorldMap } from "./map/world-map.js?v=0.3.0";
 import { multisampleKeyRanges, multisampleNoteList, sfzDocument } from "./model/multisample.js?v=0.3.0";
-import { createFoundationTerrain, FOUNDATION_SEED } from "./model/terrain.js?v=0.3.0";
+import { analysisExtent, areaDimensions, createFoundationTerrain, FOUNDATION_SEED } from "./model/terrain.js?v=0.3.0";
 import { createPatch, createReliefProfile, parsePatch } from "./model/patch.js?v=0.3.0";
 import {
   buildTerrainWavetable,
@@ -25,7 +26,6 @@ const DEFAULT_SELECTION = {
   north: 16.16,
 };
 const DEFAULT_VIEW = { center: { longitude: -61.45, latitude: 16.2 }, zoom: 9 };
-const EARTH_RADIUS_METERS = 6_371_008.8;
 const ANALYSIS_GRID_SIZE = 256;
 const AUDIO_SAMPLE_RATE = 44_100;
 const MAX_BANK_POSITION = 1;
@@ -43,6 +43,7 @@ const KEYBOARD_NOTES = new Map([
   ["KeyD", 64], ["KeyF", 65], ["KeyT", 66], ["KeyG", 67],
   ["KeyY", 68], ["KeyH", 69], ["KeyU", 70], ["KeyJ", 71], ["KeyK", 72],
 ]);
+const MAX_SELECTION_LATITUDE = 85;
 const MIN_OCTAVE_OFFSET = -3;
 const MAX_OCTAVE_OFFSET = 3;
 
@@ -57,6 +58,11 @@ root.innerHTML = `
           <div class="tool-group">
             <span class="wordmark"><span class="prompt">&gt;</span> GEOFLUTE</span>
             <button class="tool" id="new-area" type="button" aria-pressed="false">NEW AREA</button>
+            <a class="github-link" href="https://github.com/janne-s/GeoFlute" target="_blank" rel="noopener noreferrer" aria-label="GeoFlute on GitHub" title="GeoFlute on GitHub">
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M12 .7a11.5 11.5 0 0 0-3.6 22.4c.6.1.8-.3.8-.6v-2.2c-3.4.7-4.1-1.4-4.1-1.4-.5-1.4-1.3-1.8-1.3-1.8-1.1-.7.1-.7.1-.7 1.2.1 1.8 1.2 1.8 1.2 1.1 1.8 2.8 1.3 3.5 1 .1-.8.4-1.3.8-1.6-2.7-.3-5.5-1.3-5.5-5.7 0-1.3.5-2.3 1.2-3.1-.1-.3-.5-1.5.1-3.1 0 0 1-.3 3.2 1.2a11 11 0 0 1 5.8 0c2.2-1.5 3.2-1.2 3.2-1.2.6 1.6.2 2.8.1 3.1.8.8 1.2 1.8 1.2 3.1 0 4.4-2.8 5.4-5.5 5.7.4.4.8 1.1.8 2.2v3.3c0 .3.2.7.8.6A11.5 11.5 0 0 0 12 .7Z"/>
+              </svg>
+            </a>
           </div>
           <div class="tool-group">
             <button class="tool is-active" type="button" data-base-layer="relief">RELIEF</button>
@@ -75,6 +81,19 @@ root.innerHTML = `
             aria-label="Map. Use arrow keys to pan and plus or minus to zoom."
           ></div>
           <span id="data-status" class="map-overlay map-overlay-right" aria-live="polite" hidden>DEM …</span>
+          <div class="map-search">
+            <button class="tool square" id="search-toggle" type="button" aria-expanded="false" aria-controls="place-search" aria-label="Find a place">
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <circle cx="10.5" cy="10.5" r="6.5" fill="none" stroke="currentColor" stroke-width="2.2" />
+                <path d="M15.4 15.4 21 21" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" />
+              </svg>
+            </button>
+            <form class="map-search-form" id="place-search" hidden>
+              <label class="sr-only" for="place-query">Find a place, coordinates, or a map link</label>
+              <input id="place-query" type="search" autocomplete="off" spellcheck="false"
+                placeholder="PLACE · 27.9881, 86.9250 · MAP LINK" />
+            </form>
+          </div>
         </div>
         <div class="transect-bar">
           <div class="transect-control">
@@ -301,13 +320,6 @@ function clamp(value, minimum, maximum) {
   return Math.min(maximum, Math.max(minimum, value));
 }
 
-function areaDimensions(bounds) {
-  const middleLatitudeRadians = ((bounds.north + bounds.south) * Math.PI) / 360;
-  const width = EARTH_RADIUS_METERS * Math.cos(middleLatitudeRadians) * ((bounds.east - bounds.west) * Math.PI) / 180;
-  const height = EARTH_RADIUS_METERS * ((bounds.north - bounds.south) * Math.PI) / 180;
-  return { widthMeters: Math.abs(width), heightMeters: Math.abs(height) };
-}
-
 function seedFromBounds(bounds) {
   const text = [bounds.west, bounds.south, bounds.east, bounds.north].map((value) => value.toFixed(5)).join(":");
   let hash = FOUNDATION_SEED;
@@ -317,6 +329,8 @@ function seedFromBounds(bounds) {
   }
   return hash >>> 0;
 }
+
+const textEncoder = new TextEncoder();
 
 const elements = {
   terrainCanvas: requiredElement("#terrain", HTMLCanvasElement),
@@ -356,6 +370,9 @@ const elements = {
   exportForm: requiredElement("#export-form", HTMLFormElement),
   exportSubmit: requiredElement("#export-submit", HTMLButtonElement),
   exportSummary: requiredElement("#export-summary", HTMLElement),
+  searchToggle: requiredElement("#search-toggle", HTMLButtonElement),
+  searchForm: requiredElement("#place-search", HTMLFormElement),
+  searchQuery: requiredElement("#place-query", HTMLInputElement),
   exportItemSerum: requiredElement("#export-item-serum", HTMLElement),
   exportItemAbleton: requiredElement("#export-item-ableton", HTMLElement),
   exportItemCycle: requiredElement("#export-item-cycle", HTMLElement),
@@ -399,11 +416,13 @@ let wavetable;
 let currentSeed = FOUNDATION_SEED;
 let terrainRequest = null;
 let terrainLoading = true;
+let searchPending = false;
 let octaveOffset = 0;
 let profileBank = null;
 let bankTerrain = null;
 let bankBearingDeg = null;
 let scanSmoothing = null;
+let drawnWavetable = null;
 let scanning = false;
 let scanStartTime = 0;
 let activeVoice = "wavetable";
@@ -478,19 +497,6 @@ function currentEnvelope() {
   return { attackSeconds: Number(elements.attack.value), releaseSeconds: Number(elements.release.value) };
 }
 
-function transectToGeographic(transect) {
-  const center = {
-    longitude: (selection.west + selection.east) / 2,
-    latitude: (selection.south + selection.north) / 2,
-  };
-  const dimensions = areaDimensions(selection);
-  const convert = (point) => ({
-    longitude: center.longitude + (point.eastMeters / dimensions.widthMeters) * (selection.east - selection.west),
-    latitude: center.latitude + (point.northMeters / dimensions.heightMeters) * (selection.north - selection.south),
-  });
-  return { start: convert(transect.start), end: convert(transect.end) };
-}
-
 function setDataStatus(state, text) {
   elements.dataStatus.classList.remove("is-ready", "is-error");
   if (state === "is-ready") {
@@ -524,8 +530,13 @@ function isTypingTarget(target) {
   return target instanceof HTMLInputElement && TEXT_ENTRY_TYPES.has(target.type);
 }
 
+const noteButtons = new Map(
+  [...document.querySelectorAll("[data-midi]")]
+    .map((button) => [Number(button.dataset.midi), button]),
+);
+
 function noteButton(baseMidiNote) {
-  return document.querySelector(`[data-midi="${baseMidiNote}"]`);
+  return noteButtons.get(baseMidiNote);
 }
 
 function harmonicLimitFromSlider(value) {
@@ -545,8 +556,8 @@ function updateOctaveDisplay() {
   const octave = 4 + octaveOffset;
   elements.octaveValue.textContent = String(octave);
   elements.playLabel.textContent = `PLAY C${octave}`;
-  requiredElement('[data-midi="60"]', HTMLButtonElement).firstChild.textContent = `C${octave}`;
-  requiredElement('[data-midi="72"]', HTMLButtonElement).firstChild.textContent = `C${octave + 1}`;
+  noteButton(60).firstChild.textContent = `C${octave}`;
+  noteButton(72).firstChild.textContent = `C${octave + 1}`;
 }
 
 function changeOctave(delta) {
@@ -612,7 +623,13 @@ function soundingWavetable(target) {
   return { ...target, ...scanSmoothing };
 }
 
+function updateMapTransect() {
+  const parameters = currentWavetableParameters();
+  worldMap.setTransect({ bearingDeg: parameters.bearingDeg, position: parameters.position });
+}
+
 function updateWavetable() {
+  updateMapTransect();
   if (!terrain) return;
   const parameters = currentWavetableParameters();
   if (bankTerrain !== terrain || bankBearingDeg !== parameters.bearingDeg) {
@@ -627,9 +644,9 @@ function updateWavetable() {
   if (activeVoice === "bore" && boreInstrument.voices.has("hold")) {
     elements.audioStatus.textContent = noteStatusText(boreInstrument.voices.get("hold").midiNote);
   }
+  drawnWavetable = sounding;
   drawWavetable(elements.wavetableCanvas, sounding, profileBank);
   drawTerrain(elements.terrainCanvas, terrain, wavetable.transect);
-  worldMap.setTransect(transectToGeographic(wavetable.transect));
   elements.sliceDirectionValue.value = `${Math.round(wavetable.transect.bearingDeg).toString().padStart(3, "0")} DEG`;
   elements.bankPositionValue.value = wavetable.transect.position.toFixed(2);
   elements.harmonicsValue.value = String(wavetable.maximumHarmonic);
@@ -651,9 +668,10 @@ async function rebuildGeometry() {
   terrainRequest?.abort();
   terrainRequest = new AbortController();
   const request = terrainRequest;
-  const dimensions = areaDimensions(selection);
+  const extent = analysisExtent(selection);
   currentSeed = seedFromBounds(selection);
   terrainLoading = true;
+  updateMapTransect();
   updateAreaReadouts();
   updateTransportAvailability();
   setDataStatus("", "DEM LOADING");
@@ -661,8 +679,8 @@ async function rebuildGeometry() {
   try {
     const realTerrain = await loadTerrainGrid(selection, {
       size: ANALYSIS_GRID_SIZE,
-      widthMeters: Math.max(500, dimensions.widthMeters),
-      heightMeters: Math.max(500, dimensions.heightMeters),
+      widthMeters: extent.widthMeters,
+      heightMeters: extent.heightMeters,
       signal: request.signal,
     });
     if (request !== terrainRequest) return;
@@ -674,8 +692,8 @@ async function rebuildGeometry() {
     console.error(error);
     applyTerrain(createFoundationTerrain({
       seed: currentSeed,
-      widthMeters: Math.max(500, dimensions.widthMeters),
-      heightMeters: Math.max(500, dimensions.heightMeters),
+      widthMeters: extent.widthMeters,
+      heightMeters: extent.heightMeters,
     }));
     setDataStatus("is-error", "DEM FALLBACK");
     elements.demSource.textContent = `LOAD FAILED / SYNTHETIC FALLBACK / ${error instanceof Error ? error.message.toUpperCase() : "UNKNOWN ERROR"}`;
@@ -933,6 +951,70 @@ document.addEventListener("keyup", (event) => {
   activeInstrument().noteOff(`key:${event.code}`, Number(elements.release.value));
 });
 
+function setSearchOpen(open) {
+  elements.searchForm.hidden = !open;
+  elements.searchToggle.classList.toggle("is-active", open);
+  elements.searchToggle.setAttribute("aria-expanded", String(open));
+  if (open) elements.searchQuery.focus();
+  else elements.searchQuery.setCustomValidity("");
+}
+
+function moveSelectionTo(position) {
+  const halfLongitude = (selection.east - selection.west) / 2;
+  const halfLatitude = (selection.north - selection.south) / 2;
+  const latitude = clamp(
+    position.latitude,
+    -MAX_SELECTION_LATITUDE + halfLatitude,
+    MAX_SELECTION_LATITUDE - halfLatitude,
+  );
+  selection = {
+    west: position.longitude - halfLongitude,
+    east: position.longitude + halfLongitude,
+    south: latitude - halfLatitude,
+    north: latitude + halfLatitude,
+  };
+  worldMap.setSelection(selection);
+  worldMap.fitBounds(selection);
+  rebuildGeometry();
+}
+
+elements.searchToggle.addEventListener("click", () => setSearchOpen(elements.searchForm.hidden));
+
+elements.searchQuery.addEventListener("input", () => elements.searchQuery.setCustomValidity(""));
+
+elements.searchQuery.addEventListener("keydown", (event) => {
+  if (event.key !== "Escape") return;
+  event.stopPropagation();
+  setSearchOpen(false);
+  elements.searchToggle.focus();
+});
+
+elements.searchForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const query = elements.searchQuery.value.trim();
+  if (!query || searchPending) return;
+  searchPending = true;
+  elements.searchQuery.setCustomValidity("");
+  elements.searchForm.setAttribute("aria-busy", "true");
+  try {
+    const position = await findPlace(query);
+    if (!position) {
+      elements.searchQuery.setCustomValidity("No matching place was found.");
+      elements.searchQuery.reportValidity();
+      return;
+    }
+    moveSelectionTo(position);
+    elements.searchQuery.value = "";
+    setSearchOpen(false);
+  } catch (error) {
+    elements.searchQuery.setCustomValidity(error instanceof Error ? error.message : "The place search failed.");
+    elements.searchQuery.reportValidity();
+  } finally {
+    searchPending = false;
+    elements.searchForm.removeAttribute("aria-busy");
+  }
+});
+
 requiredElement("#zoom-in", HTMLButtonElement).addEventListener("click", () => worldMap.zoomStep(1));
 requiredElement("#zoom-out", HTMLButtonElement).addEventListener("click", () => worldMap.zoomStep(-1));
 requiredElement("#view-world", HTMLButtonElement).addEventListener("click", () => worldMap.setView({ longitude: 0, latitude: 15 }, 2));
@@ -1015,12 +1097,12 @@ function reliefDocument() {
   });
 }
 
-function documentByteLength(document) {
-  return new TextEncoder().encode(`${JSON.stringify(document, null, 2)}\n`).length;
+function documentByteLength(patch) {
+  return textByteLength(`${JSON.stringify(patch, null, 2)}\n`);
 }
 
 function textByteLength(text) {
-  return new TextEncoder().encode(text).length;
+  return textEncoder.encode(text).length;
 }
 
 function boreExportNotes() {
@@ -1101,10 +1183,10 @@ function cycleFile(stem) {
   };
 }
 
-function documentFile(name, document) {
+function documentFile(name, patch) {
   return {
     name,
-    blob: new Blob([`${JSON.stringify(document, null, 2)}\n`], { type: "application/json" }),
+    blob: new Blob([`${JSON.stringify(patch, null, 2)}\n`], { type: "application/json" }),
   };
 }
 
@@ -1182,7 +1264,16 @@ elements.exportForm.addEventListener("submit", async (event) => {
   }
 });
 
-root.addEventListener("input", scheduleSessionSave);
+const visualResizeObserver = new ResizeObserver(() => {
+  if (!drawnWavetable || !profileBank) return;
+  drawWavetable(elements.wavetableCanvas, drawnWavetable, profileBank);
+});
+visualResizeObserver.observe(elements.wavetableCanvas);
+
+root.addEventListener("input", (event) => {
+  if (event.target === elements.searchQuery) return;
+  scheduleSessionSave();
+});
 root.addEventListener("change", scheduleSessionSave);
 window.addEventListener("pagehide", saveSession);
 

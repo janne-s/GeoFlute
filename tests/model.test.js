@@ -7,8 +7,16 @@ import { encodeWavetableWav, wavetableWavByteLength, WAVETABLE_FRAME_SAMPLES } f
 import { zipStore } from "../src/audio/zip.js?v=0.3.0";
 import { WavetableInstrument } from "../src/audio/wavetable-synth.js?v=0.3.0";
 import { APPLICATION_VERSION, createPatch, createReliefProfile, parsePatch } from "../src/model/patch.js?v=0.3.0";
+import { isValidCoordinate, parseCoordinates } from "../src/model/coordinates.js?v=0.3.0";
 import { createMulberry32 } from "../src/model/prng.js?v=0.3.0";
-import { createFlatTerrain, createFoundationTerrain, createSinusoidalRidge } from "../src/model/terrain.js?v=0.3.0";
+import {
+  analysisExtent,
+  areaDimensions,
+  createFlatTerrain,
+  createFoundationTerrain,
+  createSinusoidalRidge,
+  MINIMUM_EXTENT_METERS,
+} from "../src/model/terrain.js?v=0.3.0";
 import {
   AutoLeveler,
   BoreLadder,
@@ -29,6 +37,7 @@ import { multisampleKeyRanges, multisampleNoteList, sfzDocument } from "../src/m
 import {
   buildTerrainWavetable,
   buildWavetableFrames,
+  clippedTransect,
   midiNoteFrequency,
   renderWavetableNote,
   resampleProfile,
@@ -267,6 +276,89 @@ describe("deterministic model foundation", () => {
     assert.equal(loaded.seamMethod, "forward-reverse-mirror");
     assert.equal(loaded.scanRateHz, 0.2);
     assert.equal(loaded.scanDepth, 1);
+  });
+});
+
+describe("place coordinates", () => {
+  const near = (position, latitude, longitude) => {
+    assert.ok(position, "expected a parsed coordinate");
+    assert.ok(Math.abs(position.latitude - latitude) < 1e-9, `latitude ${position.latitude}`);
+    assert.ok(Math.abs(position.longitude - longitude) < 1e-9, `longitude ${position.longitude}`);
+  };
+
+  it("reads a decimal pair before reaching the network", () => {
+    near(parseCoordinates("27.9881, 86.9250"), 27.9881, 86.925);
+    near(parseCoordinates("-33.8688,151.2093"), -33.8688, 151.2093);
+  });
+
+  it("keeps a decimal comma apart from the pair separator", () => {
+    near(parseCoordinates("60,1699; 24,9384"), 60.1699, 24.9384);
+    near(parseCoordinates("60,1699 24,9384"), 60.1699, 24.9384);
+    near(parseCoordinates("60.1699, 24.9384"), 60.1699, 24.9384);
+  });
+
+  it("takes the axis from a hemisphere letter whichever order it is written in", () => {
+    near(parseCoordinates("61,80228° N, 21,52714° E"), 61.80228, 21.52714);
+    near(parseCoordinates("E 21,52714 N 61,80228"), 61.80228, 21.52714);
+    near(parseCoordinates("33.8688 S, 151.2093 E"), -33.8688, 151.2093);
+  });
+
+  it("reads a pasted map link", () => {
+    near(parseCoordinates("https://www.google.com/maps/@45.8326,6.8652,12z"), 45.8326, 6.8652);
+    near(parseCoordinates("https://maps.google.com/?q=27.9881,86.9250"), 27.9881, 86.925);
+    near(parseCoordinates("https://www.openstreetmap.org/#map=11/27.9881/86.9250"), 27.9881, 86.925);
+    near(parseCoordinates("https://www.openstreetmap.org/?mlat=61.8&mlon=21.5#map=12/61.8/21.5"), 61.8, 21.5);
+  });
+
+  it("refuses a place name and an out-of-range pair, leaving them to the search service", () => {
+    assert.equal(parseCoordinates("Mount Everest"), null);
+    assert.equal(parseCoordinates(""), null);
+    assert.equal(parseCoordinates("999, 999"), null);
+    assert.equal(parseCoordinates("91.0, 0.0"), null);
+    assert.equal(parseCoordinates("0.0, 181.0"), null);
+  });
+
+  it("rejects a coordinate outside the valid range", () => {
+    assert.equal(isValidCoordinate({ latitude: 90, longitude: 180 }), true);
+    assert.equal(isValidCoordinate({ latitude: 90.1, longitude: 0 }), false);
+    assert.equal(isValidCoordinate({ latitude: Number.NaN, longitude: 0 }), false);
+    assert.equal(isValidCoordinate(null), false);
+  });
+});
+
+describe("area geometry", () => {
+  const bounds = { west: -61.75, south: 15.96, east: -61.56, north: 16.16 };
+
+  it("clips a transect from an extent alone, so the map can draw it without terrain", () => {
+    const extent = { widthMeters: 8_000, heightMeters: 4_000 };
+    const transect = clippedTransect(extent, 90, 0);
+    assert.ok(Math.abs(transect.start.eastMeters + extent.widthMeters / 2) < 1e-6);
+    assert.ok(Math.abs(transect.end.eastMeters - extent.widthMeters / 2) < 1e-6);
+    assert.ok(Math.abs(transect.lengthMeters - extent.widthMeters) < 1e-6);
+  });
+
+  it("gives the same transect for an extent and for a terrain grid of that extent", () => {
+    const terrain = createSinusoidalRidge(64, 8_000, 3, 120);
+    const fromExtent = clippedTransect(
+      { widthMeters: terrain.widthMeters, heightMeters: terrain.heightMeters },
+      37,
+      0.4,
+    );
+    const fromTerrain = buildTerrainWavetable(terrain, { bearingDeg: 37, position: 0.4 }).transect;
+    assert.deepEqual(fromExtent.start, fromTerrain.start);
+    assert.deepEqual(fromExtent.end, fromTerrain.end);
+    assert.equal(fromExtent.lengthMeters, fromTerrain.lengthMeters);
+  });
+
+  it("holds the analysis extent at a floor without disturbing ordinary areas", () => {
+    const dimensions = areaDimensions(bounds);
+    const extent = analysisExtent(bounds);
+    assert.equal(extent.widthMeters, dimensions.widthMeters);
+    assert.equal(extent.heightMeters, dimensions.heightMeters);
+
+    const tiny = { west: 0, south: 0, east: 0.0005, north: 0.0005 };
+    assert.equal(analysisExtent(tiny).widthMeters, MINIMUM_EXTENT_METERS);
+    assert.equal(analysisExtent(tiny).heightMeters, MINIMUM_EXTENT_METERS);
   });
 });
 

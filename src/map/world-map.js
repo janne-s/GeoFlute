@@ -1,3 +1,6 @@
+import { analysisExtent } from "../model/terrain.js?v=0.3.0";
+import { clippedTransect } from "../model/wavetable.js?v=0.3.0";
+
 const TILE_SIZE = 256;
 const MAX_MERCATOR_LAT = 85.05112878;
 const MIN_ZOOM = 1;
@@ -7,6 +10,7 @@ const PINCH_ZOOM_SENSITIVITY = 0.01;
 const WHEEL_ZOOM_SENSITIVITY = 0.006;
 const MAX_ZOOM_PER_EVENT = 0.5;
 const TILE_OVERLAP = 1.002;
+const BOUNDS_FIT_FRACTION = 0.7;
 
 export const MAP_PROVIDERS = {
   relief: {
@@ -158,6 +162,18 @@ export class WorldMap {
     this.updateOverlays();
   }
 
+  transectEndpoints(bounds) {
+    const extent = analysisExtent(bounds);
+    const { start, end } = clippedTransect(extent, this.transect.bearingDeg, this.transect.position);
+    const toGeographic = (point) => ({
+      longitude: (bounds.west + bounds.east) / 2
+        + (point.eastMeters / extent.widthMeters) * (bounds.east - bounds.west),
+      latitude: (bounds.south + bounds.north) / 2
+        + (point.northMeters / extent.heightMeters) * (bounds.north - bounds.south),
+    });
+    return { start: toGeographic(start), end: toGeographic(end) };
+  }
+
   setProvider(providerId) {
     const provider = MAP_PROVIDERS[providerId];
     if (!provider || provider === this.provider) return;
@@ -213,6 +229,24 @@ export class WorldMap {
     this.center = { ...center };
     this.zoom = clamp(zoom, MIN_ZOOM, MAX_ZOOM);
     this.render();
+  }
+
+  fitBounds(bounds, fill = BOUNDS_FIT_FRACTION) {
+    const northWest = project(bounds.west, bounds.north, 0);
+    const southEast = project(bounds.east, bounds.south, 0);
+    const spanX = Math.max(1e-9, Math.abs(southEast.x - northWest.x));
+    const spanY = Math.max(1e-9, Math.abs(southEast.y - northWest.y));
+    const zoom = Math.min(
+      Math.log2((this.container.clientWidth * fill) / spanX),
+      Math.log2((this.container.clientHeight * fill) / spanY),
+    );
+    this.setView(
+      {
+        longitude: (bounds.west + bounds.east) / 2,
+        latitude: unproject(northWest.x, (northWest.y + southEast.y) / 2, 0).latitude,
+      },
+      Number.isFinite(zoom) ? zoom : this.zoom,
+    );
   }
 
   zoomBy(delta, anchorX = this.container.clientWidth / 2, anchorY = this.container.clientHeight / 2) {
@@ -477,9 +511,10 @@ export class WorldMap {
       for (const handle of this.handleElements) handle.hidden = true;
     }
 
-    if (this.transect) {
-      const start = this.geoToScreen(this.transect.start);
-      const end = this.geoToScreen(this.transect.end);
+    if (this.transect && bounds) {
+      const endpoints = this.transectEndpoints(bounds);
+      const start = this.geoToScreen(endpoints.start);
+      const end = this.geoToScreen(endpoints.end);
       const length = Math.hypot(end.x - start.x, end.y - start.y);
       const angle = Math.atan2(end.y - start.y, end.x - start.x) * 180 / Math.PI;
       this.transectElement.hidden = false;

@@ -1,10 +1,18 @@
-const BACKGROUND = "#101010";
-const ACCENT = [174, 139, 255];
+const palette = getComputedStyle(document.documentElement);
+const token = (name, fallback) => palette.getPropertyValue(name).trim() || fallback;
+const BACKGROUND = token("--surface", "#101010");
+const ACCENT = token("--accent", "#a795fe");
+const MUTED = token("--muted", "#858585");
+const LINE = token("--line", "#363636");
+const OUTLINE = "rgb(0 0 0 / 65%)";
+const MINIMUM_DRAWABLE_SIZE = 24;
+const LABEL_FONT = "10px monospace";
+const LABEL_INSET = 9;
+const LABEL_BASELINE = 15;
 
 function prepareCanvas(canvas, size) {
   canvas.width = size;
   canvas.height = size;
-  canvas.style.aspectRatio = "1";
   const context = canvas.getContext("2d");
   if (!context) throw new Error("Canvas 2D context is unavailable");
   context.imageSmoothingEnabled = false;
@@ -38,13 +46,19 @@ export function drawTerrain(canvas, terrain, transect = null) {
     });
     const start = toCanvas(transect.start);
     const end = toCanvas(transect.end);
-    context.strokeStyle = `rgb(${ACCENT.join(" ")})`;
-    context.lineWidth = 1.1;
     context.beginPath();
     context.moveTo(start.x, start.y);
     context.lineTo(end.x, end.y);
+    context.strokeStyle = OUTLINE;
+    context.lineWidth = 3.1;
     context.stroke();
-    context.fillStyle = `rgb(${ACCENT.join(" ")})`;
+    context.strokeStyle = ACCENT;
+    context.lineWidth = 1.1;
+    context.stroke();
+    context.fillStyle = OUTLINE;
+    context.fillRect(start.x - 2, start.y - 2, 5, 5);
+    context.fillRect(end.x - 2, end.y - 2, 5, 5);
+    context.fillStyle = ACCENT;
     context.fillRect(start.x - 1, start.y - 1, 3, 3);
     context.fillRect(end.x - 1, end.y - 1, 3, 3);
   }
@@ -97,17 +111,17 @@ function drawProfileStack(context, bank, activePosition, area) {
     context.fillStyle = BACKGROUND;
     context.fill();
 
-    const shade = Math.round(96 - geometry.depth * 48);
+    const shade = Math.round(112 - geometry.depth * 40);
     tracePath(geometry);
     context.strokeStyle = index === activeIndex
-      ? `rgb(${ACCENT.join(" ")})`
+      ? ACCENT
       : `rgb(${shade} ${shade} ${shade})`;
     context.lineWidth = 1;
     context.stroke();
   }
 
   tracePath(traceGeometry(activeIndex));
-  context.strokeStyle = `rgb(${ACCENT.join(" ")})`;
+  context.strokeStyle = ACCENT;
   context.lineWidth = 1.6;
   context.stroke();
 }
@@ -119,25 +133,25 @@ function drawProfileStack(context, bank, activePosition, area) {
  *   minimumElevationMeters: number, maximumElevationMeters: number }} bank
  */
 export function drawWavetable(canvas, wavetable, bank) {
-  const width = Math.max(420, Math.round(canvas.clientWidth || 720));
-  const height = 260;
+  const width = Math.round(canvas.clientWidth);
+  const height = Math.round(canvas.clientHeight);
+  if (width < MINIMUM_DRAWABLE_SIZE || height < MINIMUM_DRAWABLE_SIZE) return;
   const pixelRatio = window.devicePixelRatio || 1;
-  canvas.width = width * pixelRatio;
-  canvas.height = height * pixelRatio;
-  canvas.style.aspectRatio = `${width} / ${height}`;
+  canvas.width = Math.round(width * pixelRatio);
+  canvas.height = Math.round(height * pixelRatio);
   const context = canvas.getContext("2d");
   if (!context) throw new Error("Wavetable canvas is unavailable");
   context.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0);
   context.fillStyle = BACKGROUND;
   context.fillRect(0, 0, width, height);
-  context.font = "10px monospace";
-  context.fillStyle = "#858585";
-  const splitY = height * 0.6;
+  context.font = LABEL_FONT;
+  context.fillStyle = MUTED;
+  const splitY = Math.round(height * 0.6);
   const cycleCenter = splitY + (height - splitY) / 2;
   const cycleAmplitude = (height - splitY) * 0.36;
-  context.fillText("BANK", 9, 15);
-  context.fillText("CYCLE", 9, splitY + 15);
-  context.strokeStyle = "#363636";
+  context.fillText("BANK", LABEL_INSET, LABEL_BASELINE);
+  context.fillText("CYCLE", LABEL_INSET, splitY + LABEL_BASELINE);
+  context.strokeStyle = LINE;
   context.beginPath();
   context.moveTo(0, splitY);
   context.lineTo(width, splitY);
@@ -146,13 +160,14 @@ export function drawWavetable(canvas, wavetable, bank) {
   context.stroke();
 
   drawProfileStack(context, bank, wavetable.transect.position, {
-    left: 10,
-    right: width - 10,
-    top: 20,
+    left: LABEL_INSET + 1,
+    right: width - LABEL_INSET - 1,
+    top: LABEL_BASELINE + 5,
     bottom: splitY - 10,
   });
 
-  context.strokeStyle = `rgb(${ACCENT.join(" ")})`;
+  context.strokeStyle = ACCENT;
+  context.lineWidth = 1.6;
   context.beginPath();
   for (let index = 0; index < wavetable.waveform.length; index += 1) {
     const x = (index / (wavetable.waveform.length - 1)) * (width - 1);

@@ -47,12 +47,17 @@ function bilinearElevation(terrain, eastMeters, northMeters) {
   return north + (south - north) * mixY;
 }
 
-function clippedTransect(terrain, bearingDeg, position) {
+/**
+ * @param {{ widthMeters: number, heightMeters: number }} extent
+ * @param {number} bearingDeg
+ * @param {number} position
+ */
+export function clippedTransect(extent, bearingDeg, position) {
   const radians = (bearingDeg * Math.PI) / 180;
   const direction = { x: Math.sin(radians), y: Math.cos(radians) };
   const normal = { x: -direction.y, y: direction.x };
-  const halfWidth = terrain.widthMeters / 2;
-  const halfHeight = terrain.heightMeters / 2;
+  const halfWidth = extent.widthMeters / 2;
+  const halfHeight = extent.heightMeters / 2;
   const support = Math.abs(normal.x) * halfWidth + Math.abs(normal.y) * halfHeight;
   const boundedPosition = clamp(position, -1, 1) * MAX_POSITION;
   const origin = {
