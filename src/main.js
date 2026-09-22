@@ -274,7 +274,7 @@ root.innerHTML = `
               <span class="export-item-name">KEY MAP</span>
               <span class="export-item-params">SFZ</span>
               <span class="export-item-size" id="export-size-sfz"></span>
-              <span class="export-item-target">SFORZANDO · DECENT SAMPLER</span>
+              <span class="export-item-target">SFORZANDO · SFIZZ</span>
             </label>
           </li>
           <li id="export-item-metadata">
