@@ -15,8 +15,7 @@ See it live: [**https://janne-s.github.io/GeoFlute/**](https://janne-s.github.io
 Select an area on the map, then set the direction the transect runs across it
 and where it sits. The relief along that line becomes the sound: geometry
 determines the timbre and the note you play determines the pitch. The mapping is
-musical and experimental — it is not the environmental sound of the selected
-place, nor a claimed natural frequency of it.
+musical and experimental.
 
 The area is a bank of parallel transects rather than one fixed profile.
 **POSITION** moves through the stack by hand and **SCAN** sweeps it
