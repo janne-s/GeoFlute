@@ -26,12 +26,12 @@ and decoded locally. Terrain and audio calculations remain local to the browser.
 ## Playing
 
 1. Select or move a map area with `AREA` and wait for the DEM status to be ready.
-2. Set transect direction, bank position, and harmonic limit under `CYCLE`.
+2. Set transect direction and bank position under the map, and the harmonic
+   limit under `CYCLE`.
 3. Play the on-screen notes or the `A W S E D F T G Y H U J K` keys. `Z` and `X`
    or the arrows under the keyboard shift the octave, and anything sounding
-   glides with them; `HOLD` sustains a note while you reshape the cycle.
-   `SPACE` starts and stops the preview, which otherwise releases itself after
-   a second and a half.
+   glides with them. `PLAY`, or `SPACE`, sustains a note while you reshape the
+   cycle; press either again to release it.
 4. `SCAN` sweeps the transect across the area, morphing a held note as it moves.
 5. `EXPORT` opens the package: two wavetable banks, one 2048-sample cycle with
    a `clm ` chunk for Serum, Vital and Bitwig and one 1024-sample cycle without

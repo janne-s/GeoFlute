@@ -296,6 +296,14 @@ export function midiNoteFrequency(midiNote) {
   return 440 * 2 ** ((midiNote - 69) / 12);
 }
 
+const NOTE_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
+
+export function midiNoteName(midiNote) {
+  const name = NOTE_NAMES[((midiNote % 12) + 12) % 12];
+  const octave = Math.floor(midiNote / 12) - 1;
+  return `${name}${octave}`;
+}
+
 export function renderWavetableNote(wavetable, parameters = {}) {
   const sampleRate = parameters.sampleRate ?? 44_100;
   const durationSeconds = parameters.durationSeconds ?? 2;

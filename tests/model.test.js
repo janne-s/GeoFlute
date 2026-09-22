@@ -10,6 +10,23 @@ import { APPLICATION_VERSION, createPatch, createReliefProfile, parsePatch } fro
 import { createMulberry32 } from "../src/model/prng.js?v=0.3.0";
 import { createFlatTerrain, createFoundationTerrain, createSinusoidalRidge } from "../src/model/terrain.js?v=0.3.0";
 import {
+  AutoLeveler,
+  BoreLadder,
+  boreFromProfile,
+  boreImpulseResponse,
+  boreSections,
+  boreTuningOffsetSemitones,
+  firstResonanceHz,
+  MAXIMUM_REFLECTION,
+  radiationFromTone,
+  reliefIsFlat,
+  AGC_TARGET_RMS,
+  BORE_DEFAULTS,
+  TEMPER_SEARCH_SEMITONES,
+} from "../src/model/bore.js?v=0.3.0";
+import { BoreInstrument } from "../src/audio/bore-synth.js?v=0.3.0";
+import { multisampleKeyRanges, multisampleNoteList, sfzDocument } from "../src/model/multisample.js?v=0.3.0";
+import {
   buildTerrainWavetable,
   buildWavetableFrames,
   midiNoteFrequency,
@@ -453,5 +470,185 @@ describe("release version", () => {
 
   it("reports the package version in exported documents", () => {
     assert.equal(APPLICATION_VERSION, packageVersion);
+  });
+});
+
+describe("terrain bore", () => {
+  const SAMPLE_RATE = 44_100;
+
+  function transectOf(terrain) {
+    return buildTerrainWavetable(terrain, { bearingDeg: 90, position: 0 }).elevationMeters;
+  }
+
+  it("turns flat terrain into a plain cylinder", () => {
+    const bore = boreFromProfile(transectOf(createFlatTerrain(32, 16_000)), { sections: 48, depth: 2 });
+    assert.equal(bore.largestReflection, 0);
+    assert.ok(bore.coefficients.every((value) => value === 0));
+  });
+
+  it("maps cross-section against a fixed reference rather than each area's own range", () => {
+    const tall = transectOf(createSinusoidalRidge(64, 16_000, 3, 900));
+    const low = transectOf(createSinusoidalRidge(64, 16_000, 3, 18));
+    const tallBore = boreFromProfile(tall, { sections: 48, depth: 2 });
+    const lowBore = boreFromProfile(low, { sections: 48, depth: 2 });
+    assert.ok(lowBore.largestReflection < tallBore.largestReflection / 10);
+  });
+
+  it("keeps every reflection coefficient inside the stable range", () => {
+    const bore = boreFromProfile(transectOf(createSinusoidalRidge(64, 16_000, 5, 4_000)), {
+      sections: 64,
+      depth: 3,
+    });
+    assert.ok(bore.largestReflection <= MAXIMUM_REFLECTION);
+  });
+
+  it("tunes a cylindrical bore to the requested frequency", () => {
+    const frequencyHz = 440;
+    const periodSamples = SAMPLE_RATE / frequencyHz;
+    const sections = boreSections(periodSamples, radiationFromTone(BORE_DEFAULTS.tone));
+    const bore = boreFromProfile(transectOf(createFlatTerrain(32, 16_000)), { sections, depth: 2 });
+    const response = boreImpulseResponse(bore.coefficients, { sampleRate: SAMPLE_RATE, periodSamples });
+    const resonance = firstResonanceHz(response, SAMPLE_RATE);
+    assert.ok(Math.abs(resonance - frequencyHz) < frequencyHz * 0.02);
+  });
+
+  it("recognizes flat terrain as having no relief to shape a bore with", () => {
+    assert.equal(reliefIsFlat(transectOf(createFlatTerrain(32, 16_000))), true);
+    assert.equal(reliefIsFlat(transectOf(createSinusoidalRidge(64, 16_000, 3, 4))), false);
+  });
+
+  it("stays playable on flat terrain, prepared with no excitation rather than refusing the note", () => {
+    const instrument = new BoreInstrument();
+    instrument.setRelief(transectOf(createFlatTerrain(32, 16_000)));
+    assert.equal(instrument.isFlat, true);
+    const bore = instrument.boreForNote(60);
+    assert.ok(bore.coefficients.every((value) => value === 0));
+    assert.ok(Number.isFinite(bore.periodSamples));
+  });
+
+  it("marks terrain as not flat again once it carries relief", () => {
+    const instrument = new BoreInstrument();
+    instrument.setRelief(transectOf(createFlatTerrain(32, 16_000)));
+    assert.equal(instrument.isFlat, true);
+    instrument.setRelief(transectOf(createSinusoidalRidge(64, 16_000, 3, 900)));
+    assert.equal(instrument.isFlat, false);
+  });
+
+  it("stays untempered until the throttled offset lands, then bends the note's period toward it", async () => {
+    const instrument = new BoreInstrument();
+    instrument.setParameters({ temper: true });
+    const naive = SAMPLE_RATE / midiNoteFrequency(60);
+    instrument.setRelief(transectOf(createSinusoidalRidge(64, 16_000, 3, 900)));
+    assert.equal(instrument.boreForNote(60).periodSamples, naive);
+    await new Promise((resolve) => { setTimeout(resolve, 260); });
+    assert.notEqual(instrument.temperOffsetSemitones, 0);
+    assert.notEqual(instrument.boreForNote(60).periodSamples, naive);
+  });
+
+  it("leaves the note's period untouched when temper is off", () => {
+    const instrument = new BoreInstrument();
+    instrument.setRelief(transectOf(createSinusoidalRidge(64, 16_000, 3, 900)));
+    instrument.temperOffsetSemitones = -8;
+    const { periodSamples } = instrument.boreForNote(60);
+    assert.equal(periodSamples, SAMPLE_RATE / midiNoteFrequency(60));
+  });
+
+  it("levels a quiet and a loud signal toward the same output loudness", () => {
+    function settledRms(amplitude) {
+      const leveler = new AutoLeveler(SAMPLE_RATE);
+      let sumOfSquares = 0;
+      let measured = 0;
+      for (let index = 0; index < SAMPLE_RATE; index += 1) {
+        const sample = leveler.process(amplitude * Math.sin(index * 0.19));
+        if (index >= SAMPLE_RATE / 2) {
+          sumOfSquares += sample * sample;
+          measured += 1;
+        }
+      }
+      return Math.sqrt(sumOfSquares / measured);
+    }
+    const quiet = settledRms(0.01);
+    const loud = settledRms(0.4);
+    assert.ok(Math.abs(quiet - AGC_TARGET_RMS) < 0.05);
+    assert.ok(Math.abs(loud - AGC_TARGET_RMS) < 0.05);
+  });
+
+  it("stays silent and finite when the leveled signal is already silent", () => {
+    const leveler = new AutoLeveler(SAMPLE_RATE);
+    let largest = 0;
+    for (let index = 0; index < SAMPLE_RATE; index += 1) {
+      const sample = leveler.process(0);
+      largest = Math.max(largest, Math.abs(sample));
+      assert.ok(Number.isFinite(sample));
+    }
+    assert.equal(largest, 0);
+  });
+
+  it("stays bounded when a steep bore is driven continuously", () => {
+    const elevationMeters = transectOf(createSinusoidalRidge(64, 16_000, 7, 2_500));
+    const bore = boreFromProfile(elevationMeters, { sections: 64, depth: 3 });
+    const ladder = new BoreLadder();
+    ladder.setBore(bore.coefficients, SAMPLE_RATE / 220);
+    let largest = 0;
+    for (let index = 0; index < SAMPLE_RATE; index += 1) {
+      largest = Math.max(largest, Math.abs(ladder.process(Math.sin(index) * 0.05)));
+    }
+    assert.ok(Number.isFinite(largest));
+    assert.ok(largest < 10);
+  });
+
+  it("reports no tuning offset for a plain cylinder", () => {
+    const offset = boreTuningOffsetSemitones(transectOf(createFlatTerrain(32, 16_000)), { depth: 2 });
+    assert.equal(offset, 0);
+  });
+
+  it("measures a bounded, non-trivial tuning offset for shaped terrain", () => {
+    const elevationMeters = transectOf(createSinusoidalRidge(64, 16_000, 3, 900));
+    const offset = boreTuningOffsetSemitones(elevationMeters, { depth: 2 });
+    assert.notEqual(offset, 0);
+    assert.ok(Math.abs(offset) < TEMPER_SEARCH_SEMITONES);
+  });
+
+  it("corrects a tempered bore's actual resonance back onto the requested note", () => {
+    const elevationMeters = transectOf(createSinusoidalRidge(64, 16_000, 3, 900));
+    const targetMidiNote = 60;
+    const targetHz = 440 * 2 ** ((targetMidiNote - 69) / 12);
+    const offset = boreTuningOffsetSemitones(elevationMeters, { depth: 2 });
+    const naivePeriodSamples = SAMPLE_RATE / targetHz;
+    const tunedPeriodSamples = naivePeriodSamples * 2 ** (offset / 12);
+    const sections = boreSections(tunedPeriodSamples, radiationFromTone(BORE_DEFAULTS.tone));
+    const bore = boreFromProfile(elevationMeters, { sections, depth: 2 });
+    const response = boreImpulseResponse(bore.coefficients, { sampleRate: SAMPLE_RATE, periodSamples: tunedPeriodSamples });
+    const resonance = firstResonanceHz(response, SAMPLE_RATE);
+    assert.ok(Math.abs(12 * Math.log2(resonance / targetHz)) < 1);
+  });
+});
+
+describe("multisample note layout", () => {
+  it("spans a symmetric range around the centre note at the given step", () => {
+    const notes = multisampleNoteList(60, { stepSemitones: 3, rangeSemitones: 6 });
+    assert.deepEqual(notes, [54, 57, 60, 63, 66]);
+  });
+
+  it("partitions the keyboard with no gaps, no overlaps, and full 0-127 coverage", () => {
+    const notes = multisampleNoteList(60);
+    const ranges = multisampleKeyRanges(notes);
+    assert.equal(ranges[0].lowKey, 0);
+    assert.equal(ranges[ranges.length - 1].highKey, 127);
+    for (let index = 1; index < ranges.length; index += 1) {
+      assert.equal(ranges[index].lowKey, ranges[index - 1].highKey + 1);
+    }
+    for (const range of ranges) assert.ok(range.lowKey <= range.midiNote && range.midiNote <= range.highKey);
+  });
+
+  it("writes one sfz region per sample, naming the correct file and key range", () => {
+    const notes = multisampleNoteList(60, { stepSemitones: 12, rangeSemitones: 12 });
+    const ranges = multisampleKeyRanges(notes);
+    const fileNames = notes.map((note) => `bore-${note}.wav`);
+    const document = sfzDocument({ fileNames, keyRanges: ranges, releaseSeconds: 0.3 });
+    assert.match(document, /ampeg_release=0\.300/);
+    assert.equal((document.match(/<region>/g) ?? []).length, notes.length);
+    assert.match(document, /sample=bore-60\.wav/);
+    assert.match(document, /pitch_keycenter=60/);
   });
 });

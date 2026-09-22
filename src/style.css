@@ -237,10 +237,6 @@ body.is-map-dragging {
   pointer-events: none;
 }
 
-.map-overlay-left {
-  left: 7px;
-}
-
 .map-overlay-right {
   right: 7px;
 }
@@ -355,6 +351,20 @@ body.is-map-dragging {
   margin-top: 7px;
 }
 
+.transect-bar {
+  display: flex;
+  gap: 20px;
+  margin-top: 8px;
+}
+
+.transect-control {
+  flex: 1;
+}
+
+.transect-control label {
+  margin-top: 0;
+}
+
 .info-panel {
   margin-top: 7px;
   padding-top: 8px;
@@ -428,6 +438,11 @@ canvas {
 .module h2 .tool {
   min-height: 21px;
   padding: 1px 8px;
+}
+
+.voice-tabs {
+  display: flex;
+  gap: 5px;
 }
 
 .toggle-row {
@@ -803,7 +818,12 @@ dd {
     flex-wrap: wrap;
   }
 
-  .world-map {
+  .transect-bar {
+    flex-direction: column;
+    gap: 0;
+  }
+
+  .map-stage {
     height: 360px;
   }
 }

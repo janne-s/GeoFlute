@@ -1,14 +1,18 @@
 import { downloadBlob, encodeWavetableWav, wavetableWavByteLength, WAVETABLE_FRAME_SAMPLES } from "./audio/wav.js?v=0.3.0";
 import { zipStore } from "./audio/zip.js?v=0.3.0";
 import { WavetableInstrument } from "./audio/wavetable-synth.js?v=0.3.0";
+import { BoreInstrument } from "./audio/bore-synth.js?v=0.3.0";
+import { EXPORT_SUSTAIN_SECONDS, EXPORT_TAIL_SECONDS, renderBoreMultisample } from "./audio/bore-render.js?v=0.3.0";
 import { loadTerrainGrid } from "./data/terrain-tiles.js?v=0.3.0";
 import { WorldMap } from "./map/world-map.js?v=0.3.0";
+import { multisampleKeyRanges, multisampleNoteList, sfzDocument } from "./model/multisample.js?v=0.3.0";
 import { createFoundationTerrain, FOUNDATION_SEED } from "./model/terrain.js?v=0.3.0";
 import { createPatch, createReliefProfile, parsePatch } from "./model/patch.js?v=0.3.0";
 import {
   buildTerrainWavetable,
   buildWavetableFrames,
   midiNoteFrequency,
+  midiNoteName,
   resampleProfile,
   terrainProfileBank,
 } from "./model/wavetable.js?v=0.3.0";
@@ -32,7 +36,6 @@ const MAXIMUM_HARMONICS = 256;
 const EXPORT_FRAME_COUNT = 256;
 const ABLETON_FRAME_SAMPLES = WAVETABLE_FRAME_SAMPLES / 2;
 const RELIEF_SECTIONS = 64;
-const PREVIEW_SECONDS = 1.5;
 const SESSION_STORAGE_KEY = "geoflute-session";
 const SESSION_SAVE_DELAY_MS = 500;
 const KEYBOARD_NOTES = new Map([
@@ -71,13 +74,21 @@ root.innerHTML = `
             role="application"
             aria-label="Map. Use arrow keys to pan and plus or minus to zoom."
           ></div>
-          <span id="area-readout" class="map-overlay map-overlay-left">-- × -- KM</span>
-          <span id="data-status" class="map-overlay map-overlay-right" aria-live="polite">DEM …</span>
+          <span id="data-status" class="map-overlay map-overlay-right" aria-live="polite" hidden>DEM …</span>
+        </div>
+        <div class="transect-bar">
+          <div class="transect-control">
+            <label for="slice-direction">DIRECTION <output id="slice-direction-value">090 DEG</output></label>
+            <input id="slice-direction" type="range" min="0" max="359" step="1" value="90" />
+          </div>
+          <div class="transect-control">
+            <label for="bank-position">POSITION <output id="bank-position-value">0.00</output></label>
+            <input id="bank-position" type="range" min="-1" max="1" step="0.01" value="0" />
+          </div>
         </div>
         <div id="info-panel" class="info-panel" hidden>
           <dl>
-            <div><dt>PROVENANCE</dt><dd>SIMULATED</dd></div>
-            <div><dt>MAPPING</dt><dd>DIRECT TERRAIN PROFILE</dd></div>
+            <div><dt>AREA</dt><dd id="area-readout">-- × -- KM</dd></div>
             <div><dt>BOUNDS</dt><dd id="bounds-readout">--</dd></div>
             <div><dt>TERRAIN</dt><dd id="terrain-provider">LOADING</dd></div>
             <div><dt>DEM RESOLUTION</dt><dd id="dem-resolution">--</dd></div>
@@ -94,16 +105,33 @@ root.innerHTML = `
 
       <aside class="controls" aria-label="Instrument">
         <section class="panel module">
-          <h2>CYCLE</h2>
-          <label for="slice-direction">DIRECTION <output id="slice-direction-value">090 DEG</output></label>
-          <input id="slice-direction" type="range" min="0" max="359" step="1" value="90" />
-          <label for="bank-position">POSITION <output id="bank-position-value">0.00</output></label>
-          <input id="bank-position" type="range" min="-1" max="1" step="0.01" value="0" />
-          <label for="harmonics">HARMONICS <output id="harmonics-value">64</output></label>
-          <input id="harmonics" type="range" min="0" max="1" step="0.001" value="0.714" />
-          <div class="toggle-row">
-            <button class="tool" id="mirror" type="button" aria-pressed="false">MIRROR</button>
-            <button class="tool is-active" id="normalize" type="button" aria-pressed="true">NORM</button>
+          <h2>
+            <span id="voice-title">CYCLE</span>
+            <span class="voice-tabs">
+              <button class="tool is-active" id="voice-wavetable" type="button" aria-pressed="true">WAVE</button>
+              <button class="tool" id="voice-bore" type="button" aria-pressed="false">BORE</button>
+            </span>
+          </h2>
+          <div id="wavetable-controls">
+            <label for="harmonics">HARMONICS <output id="harmonics-value">64</output></label>
+            <input id="harmonics" type="range" min="0" max="1" step="0.001" value="0.714" />
+            <div class="toggle-row">
+              <button class="tool" id="mirror" type="button" aria-pressed="false">MIRROR</button>
+              <button class="tool is-active" id="normalize" type="button" aria-pressed="true">NORM</button>
+            </div>
+          </div>
+          <div id="bore-controls" hidden>
+            <label for="bore-depth">DEPTH <output id="bore-depth-value">2.00</output></label>
+            <input id="bore-depth" type="range" min="0.25" max="3" step="0.05" value="2" />
+            <label for="bore-decay">DECAY <output id="bore-decay-value">0.85</output></label>
+            <input id="bore-decay" type="range" min="0" max="1" step="0.01" value="0.85" />
+            <label for="bore-tone">TONE <output id="bore-tone-value">0.89</output></label>
+            <input id="bore-tone" type="range" min="0" max="1" step="0.01" value="0.89" />
+            <label for="bore-blow">BLOW <output id="bore-blow-value">0.50</output></label>
+            <input id="bore-blow" type="range" min="0" max="1" step="0.01" value="0.50" />
+            <div class="toggle-row">
+              <button class="tool" id="bore-temper" type="button" aria-pressed="false">TEMPER</button>
+            </div>
           </div>
         </section>
 
@@ -152,9 +180,7 @@ root.innerHTML = `
         <section class="panel module">
           <h2>OUTPUT</h2>
           <div class="transport">
-            <button id="play" class="primary-action" type="button" aria-pressed="false" disabled><span id="play-label">PREVIEW C4</span><small>SPACE</small></button>
-            <button id="hold" class="tool" type="button" aria-pressed="false" disabled>HOLD</button>
-            <button id="stop" class="tool" type="button">STOP</button>
+            <button id="hold" class="primary-action" type="button" aria-pressed="false" disabled><span id="play-label">PLAY C4</span><small>SPACE</small></button>
           </div>
           <div class="export-row">
             <button id="open-export" class="tool" type="button" disabled>EXPORT</button>
@@ -187,7 +213,7 @@ root.innerHTML = `
       <form id="export-form" method="dialog">
         <h2 id="export-title">EXPORT</h2>
         <ul class="export-items">
-          <li>
+          <li id="export-item-serum">
             <label>
               <input type="checkbox" name="export-item" value="serum" checked />
               <span class="export-item-name">WAVETABLE BANK</span>
@@ -196,7 +222,7 @@ root.innerHTML = `
               <span class="export-item-target">SERUM · VITAL · BITWIG</span>
             </label>
           </li>
-          <li>
+          <li id="export-item-ableton">
             <label>
               <input type="checkbox" name="export-item" value="ableton" checked />
               <span class="export-item-name">WAVETABLE BANK</span>
@@ -205,7 +231,7 @@ root.innerHTML = `
               <span class="export-item-target">ABLETON</span>
             </label>
           </li>
-          <li>
+          <li id="export-item-cycle">
             <label>
               <input type="checkbox" name="export-item" value="cycle" />
               <span class="export-item-name">SINGLE CYCLE</span>
@@ -214,16 +240,34 @@ root.innerHTML = `
               <span class="export-item-target">SAMPLER · BUFFER~</span>
             </label>
           </li>
-          <li>
+          <li id="export-item-multisample" hidden>
+            <label>
+              <input type="checkbox" name="export-item" value="multisample" checked />
+              <span class="export-item-name">MULTISAMPLE</span>
+              <span class="export-item-params" id="export-params-multisample">--</span>
+              <span class="export-item-size" id="export-size-multisample"></span>
+              <span class="export-item-target">SAMPLER</span>
+            </label>
+          </li>
+          <li id="export-item-sfz" hidden>
+            <label>
+              <input type="checkbox" name="export-item" value="sfz" checked />
+              <span class="export-item-name">KEY MAP</span>
+              <span class="export-item-params">SFZ</span>
+              <span class="export-item-size" id="export-size-sfz"></span>
+              <span class="export-item-target">SFORZANDO · DECENT SAMPLER</span>
+            </label>
+          </li>
+          <li id="export-item-metadata">
             <label>
               <input type="checkbox" name="export-item" value="metadata" checked />
               <span class="export-item-name">METADATA</span>
               <span class="export-item-params">JSON</span>
               <span class="export-item-size" id="export-size-metadata"></span>
-              <span class="export-item-target">BOUNDS · DEM · SETTINGS · PROVENANCE</span>
+              <span class="export-item-target">BOUNDS · DEM · SETTINGS</span>
             </label>
           </li>
-          <li>
+          <li id="export-item-relief">
             <label>
               <input type="checkbox" name="export-item" value="relief" />
               <span class="export-item-name">RELIEF PROFILE</span>
@@ -283,6 +327,16 @@ const elements = {
   harmonics: requiredElement("#harmonics", HTMLInputElement),
   mirror: requiredElement("#mirror", HTMLButtonElement),
   normalize: requiredElement("#normalize", HTMLButtonElement),
+  voiceTitle: requiredElement("#voice-title", HTMLElement),
+  voiceWavetable: requiredElement("#voice-wavetable", HTMLButtonElement),
+  voiceBore: requiredElement("#voice-bore", HTMLButtonElement),
+  wavetableControls: requiredElement("#wavetable-controls", HTMLElement),
+  boreControls: requiredElement("#bore-controls", HTMLElement),
+  boreDepth: requiredElement("#bore-depth", HTMLInputElement),
+  boreDecay: requiredElement("#bore-decay", HTMLInputElement),
+  boreTone: requiredElement("#bore-tone", HTMLInputElement),
+  boreBlow: requiredElement("#bore-blow", HTMLInputElement),
+  boreTemper: requiredElement("#bore-temper", HTMLButtonElement),
   newArea: requiredElement("#new-area", HTMLButtonElement),
   scanToggle: requiredElement("#scan-toggle", HTMLButtonElement),
   scanRate: requiredElement("#scan-rate", HTMLInputElement),
@@ -290,10 +344,8 @@ const elements = {
   scanSmooth: requiredElement("#scan-smooth", HTMLInputElement),
   attack: requiredElement("#attack", HTMLInputElement),
   release: requiredElement("#release", HTMLInputElement),
-  play: requiredElement("#play", HTMLButtonElement),
   playLabel: requiredElement("#play-label", HTMLElement),
   hold: requiredElement("#hold", HTMLButtonElement),
-  stop: requiredElement("#stop", HTMLButtonElement),
   octaveDown: requiredElement("#octave-down", HTMLButtonElement),
   octaveUp: requiredElement("#octave-up", HTMLButtonElement),
   openExport: requiredElement("#open-export", HTMLButtonElement),
@@ -304,6 +356,12 @@ const elements = {
   exportForm: requiredElement("#export-form", HTMLFormElement),
   exportSubmit: requiredElement("#export-submit", HTMLButtonElement),
   exportSummary: requiredElement("#export-summary", HTMLElement),
+  exportItemSerum: requiredElement("#export-item-serum", HTMLElement),
+  exportItemAbleton: requiredElement("#export-item-ableton", HTMLElement),
+  exportItemCycle: requiredElement("#export-item-cycle", HTMLElement),
+  exportItemMultisample: requiredElement("#export-item-multisample", HTMLElement),
+  exportItemSfz: requiredElement("#export-item-sfz", HTMLElement),
+  exportParamsMultisample: requiredElement("#export-params-multisample", HTMLElement),
   exportError: requiredElement("#export-error", HTMLElement),
   sliceDirectionValue: requiredElement("#slice-direction-value", HTMLOutputElement),
   bankPositionValue: requiredElement("#bank-position-value", HTMLOutputElement),
@@ -313,6 +371,10 @@ const elements = {
   scanSmoothValue: requiredElement("#scan-smooth-value", HTMLOutputElement),
   attackValue: requiredElement("#attack-value", HTMLOutputElement),
   releaseValue: requiredElement("#release-value", HTMLOutputElement),
+  boreDepthValue: requiredElement("#bore-depth-value", HTMLOutputElement),
+  boreDecayValue: requiredElement("#bore-decay-value", HTMLOutputElement),
+  boreToneValue: requiredElement("#bore-tone-value", HTMLOutputElement),
+  boreBlowValue: requiredElement("#bore-blow-value", HTMLOutputElement),
   octaveValue: requiredElement("#octave-value", HTMLOutputElement),
   transectLength: requiredElement("#transect-length", HTMLElement),
   profileRange: requiredElement("#profile-range", HTMLElement),
@@ -337,8 +399,6 @@ let wavetable;
 let currentSeed = FOUNDATION_SEED;
 let terrainRequest = null;
 let terrainLoading = true;
-let previewTimer = null;
-let previewSounding = false;
 let octaveOffset = 0;
 let profileBank = null;
 let bankTerrain = null;
@@ -346,7 +406,23 @@ let bankBearingDeg = null;
 let scanSmoothing = null;
 let scanning = false;
 let scanStartTime = 0;
+let activeVoice = "wavetable";
 const wavetableInstrument = new WavetableInstrument();
+const boreInstrument = new BoreInstrument();
+
+function activeInstrument() {
+  return activeVoice === "bore" ? boreInstrument : wavetableInstrument;
+}
+
+function currentBoreParameters() {
+  return {
+    depth: Number(elements.boreDepth.value),
+    decay: Number(elements.boreDecay.value),
+    tone: Number(elements.boreTone.value),
+    blow: Number(elements.boreBlow.value),
+    temper: isPressed(elements.boreTemper),
+  };
+}
 const scanClock = new Worker(URL.createObjectURL(new Blob([
   "let timer=null;onmessage=(event)=>{clearInterval(timer);timer=event.data>0?setInterval(()=>postMessage(0),event.data):null;};",
 ], { type: "text/javascript" })));
@@ -393,6 +469,11 @@ function currentWavetableParameters() {
   };
 }
 
+function noteStatusText(midiNote) {
+  if (activeVoice === "bore" && boreInstrument.isFlat) return "SILENT / NO RELIEF ON TRANSECT";
+  return `${midiNoteFrequency(midiNote).toFixed(2)} HZ`;
+}
+
 function currentEnvelope() {
   return { attackSeconds: Number(elements.attack.value), releaseSeconds: Number(elements.release.value) };
 }
@@ -412,6 +493,12 @@ function transectToGeographic(transect) {
 
 function setDataStatus(state, text) {
   elements.dataStatus.classList.remove("is-ready", "is-error");
+  if (state === "is-ready") {
+    elements.dataStatus.hidden = true;
+    elements.dataStatus.textContent = "";
+    return;
+  }
+  elements.dataStatus.hidden = false;
   if (state) elements.dataStatus.classList.add(state);
   elements.dataStatus.textContent = text;
 }
@@ -424,7 +511,6 @@ function updateAreaReadouts() {
 }
 
 function updateTransportAvailability() {
-  elements.play.disabled = terrainLoading || !terrain;
   elements.hold.disabled = terrainLoading || !terrain;
   elements.openExport.disabled = !wavetable;
   elements.saveSession.disabled = !terrain;
@@ -458,7 +544,7 @@ function shiftedMidi(baseMidiNote) {
 function updateOctaveDisplay() {
   const octave = 4 + octaveOffset;
   elements.octaveValue.textContent = String(octave);
-  elements.playLabel.textContent = `PREVIEW C${octave}`;
+  elements.playLabel.textContent = `PLAY C${octave}`;
   requiredElement('[data-midi="60"]', HTMLButtonElement).firstChild.textContent = `C${octave}`;
   requiredElement('[data-midi="72"]', HTMLButtonElement).firstChild.textContent = `C${octave + 1}`;
 }
@@ -468,9 +554,37 @@ function changeOctave(delta) {
   if (next === octaveOffset) return;
   const semitones = (next - octaveOffset) * 12;
   octaveOffset = next;
-  wavetableInstrument.transpose(semitones);
+  activeInstrument().transpose(semitones);
   updateOctaveDisplay();
   scheduleSessionSave();
+}
+
+function updateBoreReadouts() {
+  elements.boreDepthValue.value = Number(elements.boreDepth.value).toFixed(2);
+  elements.boreDecayValue.value = Number(elements.boreDecay.value).toFixed(2);
+  elements.boreToneValue.value = Number(elements.boreTone.value).toFixed(2);
+  elements.boreBlowValue.value = Number(elements.boreBlow.value).toFixed(2);
+}
+
+function setVoice(voice) {
+  const bore = voice === "bore";
+  if (activeVoice !== voice) {
+    activeInstrument().stopAll();
+    setPressed(elements.hold, false);
+    elements.audioStatus.textContent = "";
+  }
+  activeVoice = bore ? "bore" : "wavetable";
+  setPressed(elements.voiceBore, bore);
+  setPressed(elements.voiceWavetable, !bore);
+  elements.voiceTitle.textContent = bore ? "BORE" : "CYCLE";
+  elements.wavetableControls.hidden = bore;
+  elements.boreControls.hidden = !bore;
+  elements.exportItemSerum.hidden = bore;
+  elements.exportItemAbleton.hidden = bore;
+  elements.exportItemCycle.hidden = bore;
+  elements.exportItemMultisample.hidden = !bore;
+  elements.exportItemSfz.hidden = !bore;
+  if (terrain && wavetable) updateExportSummary();
 }
 
 function soundingWavetable(target) {
@@ -509,6 +623,10 @@ function updateWavetable() {
   wavetable = buildTerrainWavetable(terrain, parameters);
   const sounding = soundingWavetable(wavetable);
   wavetableInstrument.setWavetable(sounding);
+  boreInstrument.setRelief(wavetable.elevationMeters);
+  if (activeVoice === "bore" && boreInstrument.voices.has("hold")) {
+    elements.audioStatus.textContent = noteStatusText(boreInstrument.voices.get("hold").midiNote);
+  }
   drawWavetable(elements.wavetableCanvas, sounding, profileBank);
   drawTerrain(elements.terrainCanvas, terrain, wavetable.transect);
   worldMap.setTransect(transectToGeographic(wavetable.transect));
@@ -597,14 +715,19 @@ function patchDocument() {
     scanRateHz: Number(elements.scanRate.value),
     scanDepth: Number(elements.scanDepth.value),
     scanSmooth: Number(elements.scanSmooth.value),
+    voice: activeVoice,
+    boreDepth: Number(elements.boreDepth.value),
+    boreDecay: Number(elements.boreDecay.value),
+    boreTone: Number(elements.boreTone.value),
+    boreBlow: Number(elements.boreBlow.value),
+    boreTemper: isPressed(elements.boreTemper),
     seed: currentSeed,
   });
 }
 
 function applyPatch(patch) {
   stopScan();
-  stopPreview();
-  wavetableInstrument.stopAll();
+  activeInstrument().stopAll();
   setPressed(elements.hold, false);
   octaveOffset = patch.octaveOffset;
   elements.sliceDirection.value = String(patch.bearingDeg);
@@ -615,6 +738,11 @@ function applyPatch(patch) {
   elements.scanRate.value = String(patch.scanRateHz);
   elements.scanDepth.value = String(patch.scanDepth);
   elements.scanSmooth.value = String(patch.scanSmooth);
+  elements.boreDepth.value = String(patch.boreDepth);
+  elements.boreDecay.value = String(patch.boreDecay);
+  elements.boreTone.value = String(patch.boreTone);
+  elements.boreBlow.value = String(patch.boreBlow);
+  setPressed(elements.boreTemper, patch.boreTemper);
   setPressed(elements.mirror, patch.seamMethod === "forward-reverse-mirror");
   setPressed(elements.normalize, patch.normalized);
   elements.attackValue.value = `${patch.attackSeconds.toFixed(3)} S`;
@@ -622,6 +750,9 @@ function applyPatch(patch) {
   elements.scanRateValue.value = `${patch.scanRateHz.toFixed(2)} HZ`;
   elements.scanDepthValue.value = patch.scanDepth.toFixed(2);
   elements.scanSmoothValue.value = patch.scanSmooth.toFixed(2);
+  updateBoreReadouts();
+  setVoice(patch.voice);
+  boreInstrument.setParameters(currentBoreParameters());
   updateOctaveDisplay();
   selection = patch.selection;
   worldMap.setSelection(selection);
@@ -706,6 +837,26 @@ for (const button of [elements.mirror, elements.normalize]) {
     updateWavetable();
   });
 }
+for (const input of [elements.boreDepth, elements.boreDecay, elements.boreTone, elements.boreBlow]) {
+  input.addEventListener("input", () => {
+    updateBoreReadouts();
+    boreInstrument.setParameters(currentBoreParameters());
+    scheduleSessionSave();
+  });
+}
+elements.boreTemper.addEventListener("click", () => {
+  setPressed(elements.boreTemper, !isPressed(elements.boreTemper));
+  boreInstrument.setParameters(currentBoreParameters());
+  scheduleSessionSave();
+});
+elements.voiceWavetable.addEventListener("click", () => {
+  setVoice("wavetable");
+  scheduleSessionSave();
+});
+elements.voiceBore.addEventListener("click", () => {
+  setVoice("bore");
+  scheduleSessionSave();
+});
 elements.scanToggle.addEventListener("click", () => {
   if (!scanning) startScan();
   else stopScan();
@@ -726,7 +877,7 @@ for (const layerButton of document.querySelectorAll("[data-base-layer]")) {
 
 for (const button of document.querySelectorAll("[data-midi]")) {
   const releasePointerNote = (event) => {
-    wavetableInstrument.noteOff(`pointer:${event.pointerId}`, Number(elements.release.value));
+    activeInstrument().noteOff(`pointer:${event.pointerId}`, Number(elements.release.value));
     button.classList.remove("is-active");
   };
   button.addEventListener("pointerdown", async (event) => {
@@ -736,10 +887,8 @@ for (const button of document.querySelectorAll("[data-midi]")) {
     button.classList.add("is-active");
     const midiNote = shiftedMidi(Number(button.dataset.midi));
     try {
-      const played = await wavetableInstrument.noteOn(`pointer:${event.pointerId}`, midiNote, currentEnvelope());
-      elements.audioStatus.textContent = played
-        ? `${midiNoteFrequency(midiNote).toFixed(2)} HZ`
-        : "SILENT / NO RELIEF ON TRANSECT";
+      const played = await activeInstrument().noteOn(`pointer:${event.pointerId}`, midiNote, currentEnvelope());
+      elements.audioStatus.textContent = played ? noteStatusText(midiNote) : "SILENT / NO RELIEF ON TRANSECT";
     } catch (error) {
       elements.audioStatus.textContent = error instanceof Error ? error.message.toUpperCase() : "AUDIO ERROR";
     }
@@ -755,7 +904,7 @@ document.addEventListener("keydown", async (event) => {
   if (event.code === "Space") {
     if (event.target instanceof HTMLButtonElement) return;
     event.preventDefault();
-    await togglePreview();
+    await toggleHold();
     return;
   }
 
@@ -771,10 +920,8 @@ document.addEventListener("keydown", async (event) => {
   const midiNote = shiftedMidi(baseMidiNote);
   noteButton(baseMidiNote)?.classList.add("is-active");
   try {
-    const played = await wavetableInstrument.noteOn(`key:${event.code}`, midiNote, currentEnvelope());
-    elements.audioStatus.textContent = played
-      ? `${midiNoteFrequency(midiNote).toFixed(2)} HZ`
-      : "SILENT / NO RELIEF ON TRANSECT";
+    const played = await activeInstrument().noteOn(`key:${event.code}`, midiNote, currentEnvelope());
+    elements.audioStatus.textContent = played ? noteStatusText(midiNote) : "SILENT / NO RELIEF ON TRANSECT";
   } catch (error) {
     elements.audioStatus.textContent = error instanceof Error ? error.message.toUpperCase() : "AUDIO ERROR";
   }
@@ -783,7 +930,7 @@ document.addEventListener("keyup", (event) => {
   const baseMidiNote = KEYBOARD_NOTES.get(event.code);
   if (baseMidiNote === undefined) return;
   noteButton(baseMidiNote)?.classList.remove("is-active");
-  wavetableInstrument.noteOff(`key:${event.code}`, Number(elements.release.value));
+  activeInstrument().noteOff(`key:${event.code}`, Number(elements.release.value));
 });
 
 requiredElement("#zoom-in", HTMLButtonElement).addEventListener("click", () => worldMap.zoomStep(1));
@@ -822,69 +969,31 @@ elements.sessionFile.addEventListener("change", async (event) => {
 elements.octaveDown.addEventListener("click", () => changeOctave(-1));
 elements.octaveUp.addEventListener("click", () => changeOctave(1));
 
-elements.hold.addEventListener("click", async () => {
+async function toggleHold() {
   if (isPressed(elements.hold)) {
-    wavetableInstrument.noteOff("hold", Number(elements.release.value));
+    activeInstrument().noteOff("hold", Number(elements.release.value));
     setPressed(elements.hold, false);
     elements.audioStatus.textContent = "";
     return;
   }
   const midiNote = shiftedMidi(60);
   try {
-    const played = await wavetableInstrument.noteOn("hold", midiNote, currentEnvelope());
+    const played = await activeInstrument().noteOn("hold", midiNote, currentEnvelope());
     setPressed(elements.hold, played);
-    elements.audioStatus.textContent = played
-      ? `HOLD ${midiNoteFrequency(midiNote).toFixed(2)} HZ`
-      : "SILENT / NO RELIEF ON TRANSECT";
+    elements.audioStatus.textContent = played ? noteStatusText(midiNote) : "SILENT / NO RELIEF ON TRANSECT";
   } catch (error) {
     elements.audioStatus.textContent = error instanceof Error ? error.message.toUpperCase() : "AUDIO ERROR";
   }
-});
-
-function stopPreview() {
-  clearTimeout(previewTimer);
-  if (!previewSounding) return;
-  previewSounding = false;
-  setPressed(elements.play, false);
-  wavetableInstrument.noteOff("preview", Number(elements.release.value));
-  elements.audioStatus.textContent = "";
 }
 
-async function togglePreview() {
-  if (previewSounding) {
-    stopPreview();
-    return;
-  }
-  elements.play.disabled = true;
-  const midiNote = shiftedMidi(60);
-  try {
-    const played = await wavetableInstrument.noteOn("preview", midiNote, currentEnvelope());
-    previewSounding = played;
-    setPressed(elements.play, played);
-    elements.audioStatus.textContent = played
-      ? `${midiNoteFrequency(midiNote).toFixed(2)} HZ`
-      : "SILENT / NO RELIEF ON TRANSECT";
-    if (played) previewTimer = setTimeout(stopPreview, PREVIEW_SECONDS * 1_000);
-  } catch (error) {
-    elements.audioStatus.textContent = error instanceof Error ? error.message.toUpperCase() : "AUDIO ERROR";
-  } finally {
-    updateTransportAvailability();
-  }
-}
-
-elements.play.addEventListener("click", togglePreview);
-
-elements.stop.addEventListener("click", () => {
-  stopPreview();
-  wavetableInstrument.stopAll();
-  setPressed(elements.hold, false);
-  elements.audioStatus.textContent = "";
-});
+elements.hold.addEventListener("click", toggleHold);
 
 function exportSelection() {
   return new Set(
     [...elements.exportForm.querySelectorAll('input[name="export-item"]')]
-      .filter((input) => input instanceof HTMLInputElement && input.checked)
+      .filter((input) => (
+        input instanceof HTMLInputElement && input.checked && !input.closest("li").hidden
+      ))
       .map((input) => input.value),
   );
 }
@@ -910,13 +1019,38 @@ function documentByteLength(document) {
   return new TextEncoder().encode(`${JSON.stringify(document, null, 2)}\n`).length;
 }
 
+function textByteLength(text) {
+  return new TextEncoder().encode(text).length;
+}
+
+function boreExportNotes() {
+  return multisampleNoteList(shiftedMidi(60));
+}
+
+function boreExportFileNames(stem, notes) {
+  return notes.map((midiNote) => `${stem}-${midiNoteName(midiNote).replace("#", "s")}.wav`);
+}
+
+function boreExportSfz(stem) {
+  const notes = boreExportNotes();
+  const fileNames = boreExportFileNames(stem, notes);
+  const keyRanges = multisampleKeyRanges(notes);
+  return sfzDocument({ fileNames, keyRanges, releaseSeconds: Number(elements.release.value) });
+}
+
 function exportItemSizes() {
+  const stem = patchFileStem();
+  const notes = boreExportNotes();
+  const noteSeconds = EXPORT_SUSTAIN_SECONDS + Number(elements.release.value) + EXPORT_TAIL_SECONDS;
+  const noteSamples = Math.ceil(noteSeconds * AUDIO_SAMPLE_RATE);
   return {
     serum: wavetableWavByteLength(EXPORT_FRAME_COUNT * WAVETABLE_FRAME_SAMPLES, {
       cycleSamples: WAVETABLE_FRAME_SAMPLES,
     }),
     ableton: wavetableWavByteLength(EXPORT_FRAME_COUNT * ABLETON_FRAME_SAMPLES, { declareCycle: false }),
     cycle: wavetableWavByteLength(WAVETABLE_FRAME_SAMPLES, { declareCycle: false }),
+    multisample: notes.length * wavetableWavByteLength(noteSamples, { declareCycle: false }),
+    sfz: textByteLength(boreExportSfz(stem)),
     metadata: documentByteLength(patchDocument()),
     relief: documentByteLength(reliefDocument()),
   };
@@ -932,6 +1066,7 @@ function updateExportSummary() {
   for (const [key, bytes] of Object.entries(sizes)) {
     requiredElement(`#export-size-${key}`, HTMLElement).textContent = formatBytes(bytes);
   }
+  elements.exportParamsMultisample.textContent = `${boreExportNotes().length} NOTES`;
   const selected = exportSelection();
   const total = [...selected].reduce((sum, key) => sum + sizes[key], 0);
   elements.exportSummary.textContent = selected.size
@@ -973,11 +1108,34 @@ function documentFile(name, document) {
   };
 }
 
+async function multisampleFiles(stem) {
+  const notes = boreExportNotes();
+  const fileNames = boreExportFileNames(stem, notes);
+  const renders = await renderBoreMultisample(wavetable.elevationMeters, notes, currentBoreParameters(), {
+    sampleRate: AUDIO_SAMPLE_RATE,
+    attackSeconds: Number(elements.attack.value),
+    releaseSeconds: Number(elements.release.value),
+  });
+  return renders.map((render, index) => ({
+    name: fileNames[index],
+    blob: encodeWavetableWav(render.samples, AUDIO_SAMPLE_RATE, { declareCycle: false }),
+  }));
+}
+
+function sfzFile(stem) {
+  return {
+    name: `${stem}.sfz`,
+    blob: new Blob([boreExportSfz(stem)], { type: "text/plain" }),
+  };
+}
+
 async function buildExportFiles(selected, stem) {
   const files = [];
   if (selected.has("serum")) files.push(bankFile(stem, WAVETABLE_FRAME_SAMPLES, true, "serum"));
   if (selected.has("ableton")) files.push(bankFile(stem, ABLETON_FRAME_SAMPLES, false, "ableton"));
   if (selected.has("cycle")) files.push(cycleFile(stem));
+  if (selected.has("multisample")) files.push(...await multisampleFiles(stem));
+  if (selected.has("sfz")) files.push(sfzFile(stem));
   if (selected.has("metadata")) files.push(documentFile(`${stem}.geoflute.json`, patchDocument()));
   if (selected.has("relief")) files.push(documentFile(`${stem}.geoflute-relief.json`, reliefDocument()));
   return files;

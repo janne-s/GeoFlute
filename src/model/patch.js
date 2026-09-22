@@ -1,7 +1,9 @@
+import { BORE_DEFAULTS, BORE_RANGES } from "./bore.js?v=0.3.0";
 import { SEAM_METHODS } from "./wavetable.js?v=0.3.0";
 
 export const PATCH_FORMAT = "geoflute-patch";
-export const PATCH_SCHEMA_VERSION = 1;
+export const PATCH_SCHEMA_VERSION = 2;
+export const VOICES = ["wavetable", "bore"];
 export const RELIEF_FORMAT = "geoflute-relief";
 export const RELIEF_SCHEMA_VERSION = 1;
 
@@ -19,6 +21,10 @@ const RANGES = {
   scanSmooth: { minimum: 0, maximum: 1, fallback: 0.3 },
   octaveOffset: { minimum: -3, maximum: 3, fallback: 0 },
   zoom: { minimum: 1, maximum: 14, fallback: 9 },
+  boreDepth: { ...BORE_RANGES.depth, fallback: BORE_DEFAULTS.depth },
+  boreDecay: { ...BORE_RANGES.decay, fallback: BORE_DEFAULTS.decay },
+  boreTone: { ...BORE_RANGES.tone, fallback: BORE_DEFAULTS.tone },
+  boreBlow: { ...BORE_RANGES.blow, fallback: BORE_DEFAULTS.blow },
 };
 
 function bounded(value, range) {
@@ -64,6 +70,16 @@ export function createPatch(state) {
       pitchMapping: "midi-equal-temperament-a4-440",
       octaveOffset: state.octaveOffset,
       envelope: { attackSeconds: state.attackSeconds, releaseSeconds: state.releaseSeconds },
+    },
+    voice: VOICES.includes(state.voice) ? state.voice : VOICES[0],
+    bore: {
+      mapping: "absolute-relief-cross-section",
+      referenceReliefMeters: 1_000,
+      depth: state.boreDepth,
+      decay: state.boreDecay,
+      tone: state.boreTone,
+      blow: state.boreBlow,
+      temper: state.boreTemper,
     },
     scan: {
       rateHz: state.scanRateHz,
@@ -126,6 +142,7 @@ export function parsePatch(text) {
   const bounds = value.geometry.bounds;
   const cycle = value.cycle ?? {};
   const scan = value.scan ?? {};
+  const bore = value.bore ?? {};
   const envelope = cycle.envelope ?? {};
   const view = value.view ?? {};
 
@@ -156,5 +173,11 @@ export function parsePatch(text) {
     scanRateHz: bounded(scan.rateHz, RANGES.scanRateHz),
     scanDepth: bounded(scan.depth, RANGES.scanDepth),
     scanSmooth: bounded(scan.smooth, RANGES.scanSmooth),
+    voice: VOICES.includes(value.voice) ? value.voice : VOICES[0],
+    boreDepth: bounded(bore.depth, RANGES.boreDepth),
+    boreDecay: bounded(bore.decay, RANGES.boreDecay),
+    boreTone: bounded(bore.tone, RANGES.boreTone),
+    boreBlow: bounded(bore.blow, RANGES.boreBlow),
+    boreTemper: Boolean(bore.temper),
   };
 }
