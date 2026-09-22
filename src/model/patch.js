@@ -8,7 +8,6 @@ export const RELIEF_FORMAT = "geoflute-relief";
 export const RELIEF_SCHEMA_VERSION = 1;
 
 export const APPLICATION_VERSION = "0.3.0";
-const DISCLAIMER = "Direct terrain-profile mapping for musical synthesis; not an environmental sound recording or physical simulation.";
 
 const RANGES = {
   bearingDeg: { minimum: 0, maximum: 359, fallback: 90 },
@@ -47,8 +46,6 @@ export function createPatch(state) {
     schemaVersion: PATCH_SCHEMA_VERSION,
     name: "GeoFlute terrain wavetable",
     application: { version: APPLICATION_VERSION, exportedAt: new Date().toISOString() },
-    provenance: "SIMULATED",
-    disclaimer: DISCLAIMER,
     geometry: {
       bounds: state.selection,
       widthMeters: state.widthMeters,
@@ -106,8 +103,6 @@ export function createReliefProfile(state) {
     schemaVersion: RELIEF_SCHEMA_VERSION,
     name: "GeoFlute transect relief",
     application: { version: APPLICATION_VERSION, exportedAt: new Date().toISOString() },
-    provenance: "SIMULATED",
-    disclaimer: DISCLAIMER,
     units: { elevation: "metres", distance: "metres", angle: "compass-degrees" },
     geometry: {
       bounds: state.selection,

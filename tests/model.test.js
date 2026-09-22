@@ -517,7 +517,6 @@ describe("export package", () => {
     assert.equal(document.format, "geoflute-relief");
     assert.equal(document.transect.sections, 64);
     assert.equal(document.elevationMeters.length, 64);
-    assert.equal(document.provenance, "SIMULATED");
     assert.ok(document.elevationRangeMeters[1] > document.elevationRangeMeters[0]);
     assert.ok(document.elevationMeters.every(Number.isFinite));
   });
