@@ -1,13 +1,15 @@
 import {
+  AGC_OUTPUT_GAIN,
   AutoLeveler,
   BoreLadder,
   BreathNoise,
   BORE_DEFAULTS,
   endReflectionFromDecay,
   jetFromBlow,
-  radiationFromTone,
   stereoNoiseMix,
-} from "../model/bore.js?v=0.4.0";
+  wallDecibelsFromDecay,
+  wallTiltDecibelsFromTone,
+} from "../model/bore.js?v=0.4.1";
 
 const LEFT_BREATH_SALT = 0x5bf0_3635;
 const RIGHT_BREATH_SALT = 0x27d4_eb2f;
@@ -37,9 +39,10 @@ class BoreVoiceProcessor extends AudioWorkletProcessor {
     this.stereo = false;
     this.breathMix = stereoNoiseMix(0);
     const endReflection = endReflectionFromDecay(BORE_DEFAULTS.decay);
-    const radiation = radiationFromTone(BORE_DEFAULTS.tone);
-    this.leftLadder.setLoop(endReflection, radiation);
-    this.rightLadder.setLoop(endReflection, radiation);
+    const wallDecibels = wallDecibelsFromDecay(BORE_DEFAULTS.decay);
+    const wallTilt = wallTiltDecibelsFromTone(BORE_DEFAULTS.tone);
+    this.leftLadder.setLoop(endReflection, wallDecibels, wallTilt);
+    this.rightLadder.setLoop(endReflection, wallDecibels, wallTilt);
     if (settings.coefficients) this.applyBore(settings);
     this.port.onmessage = (event) => {
       const message = event.data;
@@ -72,15 +75,16 @@ class BoreVoiceProcessor extends AudioWorkletProcessor {
     const right = outputs[0][1];
     const jet = jetFromBlow(parameters.blow[0]);
     const endReflection = endReflectionFromDecay(parameters.decay[0]);
-    const radiation = radiationFromTone(parameters.tone[0]);
-    this.leftLadder.setLoop(endReflection, radiation);
-    if (this.stereo) this.rightLadder.setLoop(endReflection, radiation);
+    const wallDecibels = wallDecibelsFromDecay(parameters.decay[0]);
+    const wallTilt = wallTiltDecibelsFromTone(parameters.tone[0]);
+    this.leftLadder.setLoop(endReflection, wallDecibels, wallTilt);
+    if (this.stereo) this.rightLadder.setLoop(endReflection, wallDecibels, wallTilt);
 
     for (let index = 0; index < left.length; index += 1) {
       if (!this.stereo) {
         const excitation = this.excited ? this.sharedBreath.next() * jet : 0;
         const pressure = this.leftLadder.process(excitation);
-        const sample = Math.tanh(pressure * this.leveler.advance(pressure));
+        const sample = AGC_OUTPUT_GAIN * Math.tanh(pressure * this.leveler.advance(pressure));
         left[index] = sample;
         if (right) right[index] = sample;
         continue;
@@ -95,8 +99,8 @@ class BoreVoiceProcessor extends AudioWorkletProcessor {
       const leftPressure = this.leftLadder.process(leftExcitation);
       const rightPressure = this.rightLadder.process(rightExcitation);
       const gain = this.leveler.advance((leftPressure + rightPressure) * 0.5);
-      left[index] = Math.tanh(leftPressure * gain);
-      if (right) right[index] = Math.tanh(rightPressure * gain);
+      left[index] = AGC_OUTPUT_GAIN * Math.tanh(leftPressure * gain);
+      if (right) right[index] = AGC_OUTPUT_GAIN * Math.tanh(rightPressure * gain);
     }
     return this.running;
   }

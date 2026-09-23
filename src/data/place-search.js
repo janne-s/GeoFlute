@@ -1,4 +1,4 @@
-import { isValidCoordinate, parseCoordinates } from "../model/coordinates.js?v=0.4.0";
+import { isValidCoordinate, parseCoordinates } from "../model/coordinates.js?v=0.4.1";
 
 const SERVICE_URL = "https://nominatim.openstreetmap.org/search";
 const CACHE_PREFIX = "geoflute-place:";

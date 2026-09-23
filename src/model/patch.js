@@ -1,5 +1,5 @@
-import { BORE_DEFAULTS, BORE_RANGES } from "./bore.js?v=0.4.0";
-import { SEAM_METHODS } from "./wavetable.js?v=0.4.0";
+import { BORE_DEFAULTS, BORE_RANGES } from "./bore.js?v=0.4.1";
+import { SEAM_METHODS } from "./wavetable.js?v=0.4.1";
 
 export const PATCH_FORMAT = "geoflute-patch";
 export const PATCH_SCHEMA_VERSION = 3;
@@ -7,7 +7,7 @@ export const VOICES = ["wavetable", "bore"];
 export const RELIEF_FORMAT = "geoflute-relief";
 export const RELIEF_SCHEMA_VERSION = 1;
 
-export const APPLICATION_VERSION = "0.4.0";
+export const APPLICATION_VERSION = "0.4.1";
 
 const RANGES = {
   bearingDeg: { minimum: 0, maximum: 359, fallback: 90 },

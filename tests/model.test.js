@@ -3,12 +3,12 @@ import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, it } from "node:test";
-import { encodeNoteWav, encodeWavetableWav, wavetableWavByteLength, WAVETABLE_FRAME_SAMPLES } from "../src/audio/wav.js?v=0.4.0";
-import { zipStore } from "../src/audio/zip.js?v=0.4.0";
-import { WavetableInstrument } from "../src/audio/wavetable-synth.js?v=0.4.0";
-import { APPLICATION_VERSION, createPatch, createReliefProfile, parsePatch } from "../src/model/patch.js?v=0.4.0";
-import { isValidCoordinate, parseCoordinates } from "../src/model/coordinates.js?v=0.4.0";
-import { createMulberry32 } from "../src/model/prng.js?v=0.4.0";
+import { encodeNoteWav, encodeWavetableWav, wavetableWavByteLength, WAVETABLE_FRAME_SAMPLES } from "../src/audio/wav.js?v=0.4.1";
+import { zipStore } from "../src/audio/zip.js?v=0.4.1";
+import { WavetableInstrument } from "../src/audio/wavetable-synth.js?v=0.4.1";
+import { APPLICATION_VERSION, createPatch, createReliefProfile, parsePatch } from "../src/model/patch.js?v=0.4.1";
+import { isValidCoordinate, parseCoordinates } from "../src/model/coordinates.js?v=0.4.1";
+import { createMulberry32 } from "../src/model/prng.js?v=0.4.1";
 import {
   analysisExtent,
   areaDimensions,
@@ -16,7 +16,7 @@ import {
   createFoundationTerrain,
   createSinusoidalRidge,
   MINIMUM_EXTENT_METERS,
-} from "../src/model/terrain.js?v=0.4.0";
+} from "../src/model/terrain.js?v=0.4.1";
 import {
   AutoLeveler,
   BoreLadder,
@@ -27,16 +27,21 @@ import {
   boreTuningOffsetSemitones,
   firstResonanceHz,
   MAXIMUM_REFLECTION,
-  radiationFromTone,
   reliefIsFlat,
   stereoNoiseMix,
   stereoTransectPositions,
+  AGC_OUTPUT_GAIN,
   AGC_TARGET_RMS,
   BORE_DEFAULTS,
+  endReflectionFromDecay,
+  roundTripDecibelsFromDecay,
+  wallDecibelsFromDecay,
+  wallFilterCoefficients,
+  wallTiltDecibelsFromTone,
   TEMPER_SEARCH_SEMITONES,
-} from "../src/model/bore.js?v=0.4.0";
-import { BoreInstrument } from "../src/audio/bore-synth.js?v=0.4.0";
-import { multisampleKeyRanges, multisampleNoteList, sfzDocument } from "../src/model/multisample.js?v=0.4.0";
+} from "../src/model/bore.js?v=0.4.1";
+import { BoreInstrument } from "../src/audio/bore-synth.js?v=0.4.1";
+import { multisampleKeyRanges, multisampleNoteList, sfzDocument } from "../src/model/multisample.js?v=0.4.1";
 import {
   buildTerrainWavetable,
   buildWavetableFrames,
@@ -48,7 +53,7 @@ import {
   transectSeparationMeters,
   MAX_TRANSECT_POSITION,
   WAVETABLE_LENGTH,
-} from "../src/model/wavetable.js?v=0.4.0";
+} from "../src/model/wavetable.js?v=0.4.1";
 
 describe("deterministic model foundation", () => {
   it("repeats the same pseudo-random sequence for an identical seed", () => {
@@ -591,6 +596,83 @@ describe("terrain bore", () => {
     assert.ok(lowBore.largestReflection < tallBore.largestReflection / 10);
   });
 
+  it("damps a shaped bore's interior instead of only its two ends", () => {
+    const elevationMeters = transectOf(createSinusoidalRidge(96, 16_000, 9, 900));
+    const periodSamples = SAMPLE_RATE / 220;
+    const bore = boreFromProfile(elevationMeters, {
+      sections: boreSections(periodSamples),
+      depth: 3,
+    });
+    const damped = boreImpulseResponse(bore.coefficients, {
+      sampleRate: SAMPLE_RATE,
+      seconds: 1,
+      periodSamples,
+    });
+    const losslessWalls = new BoreLadder();
+    losslessWalls.setLoop(endReflectionFromDecay(BORE_DEFAULTS.decay), 0, 0);
+    losslessWalls.setBore(bore.coefficients, periodSamples);
+    const undamped = new Float64Array(damped.length);
+    for (let index = 0; index < undamped.length; index += 1) {
+      undamped[index] = losslessWalls.process(index === 0 ? 1 : 0);
+    }
+    const windowLength = Math.round(0.2 * SAMPLE_RATE);
+    const rms = (signal, from) => {
+      let sumOfSquares = 0;
+      for (let index = from; index < from + windowLength; index += 1) {
+        sumOfSquares += signal[index] * signal[index];
+      }
+      return Math.sqrt(sumOfSquares / windowLength);
+    };
+    const tail = Math.round(0.5 * SAMPLE_RATE);
+    assert.ok(rms(damped, tail) < rms(undamped, tail) / 2);
+    assert.ok(rms(damped, tail) > rms(damped, Math.round(0.02 * SAMPLE_RATE)) / 20);
+  });
+
+  it("spreads one round-trip loss evenly however many sections carry it", () => {
+    const decibels = 0.6;
+    const losses = [8, 48, 190, 320].map((sections) => {
+      const { gain } = wallFilterCoefficients(decibels, 0, sections);
+      return -20 * Math.log10(gain ** (2 * sections));
+    });
+    for (const loss of losses) assert.ok(Math.abs(loss - decibels) < 1e-9);
+  });
+
+  it("keeps the wall filter a loss at every frequency and stable", () => {
+    for (const sections of [4, 48, 320]) {
+      for (const tone of [0, 0.25, 0.5, 0.75, 1]) {
+        const { gain, pole } = wallFilterCoefficients(
+          wallDecibelsFromDecay(0),
+          wallTiltDecibelsFromTone(tone),
+          sections,
+        );
+        assert.ok(gain > 0 && gain < 1);
+        assert.ok(pole > 0 && pole <= 1);
+        assert.ok(gain * (pole / (2 - pole)) < 1);
+      }
+    }
+  });
+
+  it("gives the wall most of the round trip's loss so trapped modes are damped", () => {
+    for (const decay of [0, 0.5, 0.85, 1]) {
+      const total = roundTripDecibelsFromDecay(decay);
+      const wall = wallDecibelsFromDecay(decay);
+      const ends = -20 * Math.log10(Math.abs(endReflectionFromDecay(decay)));
+      assert.ok(wall > ends);
+      assert.ok(Math.abs(wall + ends - total) < 1e-9);
+      assert.ok(Math.abs(endReflectionFromDecay(decay)) < 1);
+    }
+  });
+
+  it("moves both loss controls over the whole length of their travel", () => {
+    const steps = [0, 0.2, 0.4, 0.6, 0.8, 1];
+    const losses = steps.map(roundTripDecibelsFromDecay);
+    const tilts = steps.map(wallTiltDecibelsFromTone);
+    for (let index = 1; index < steps.length; index += 1) {
+      assert.ok(losses[index] < losses[index - 1] * 0.75);
+      assert.ok(tilts[index] < tilts[index - 1] * 0.8);
+    }
+  });
+
   it("keeps every reflection coefficient inside the stable range", () => {
     const bore = boreFromProfile(transectOf(createSinusoidalRidge(64, 16_000, 5, 4_000)), {
       sections: 64,
@@ -602,7 +684,7 @@ describe("terrain bore", () => {
   it("tunes a cylindrical bore to the requested frequency", () => {
     const frequencyHz = 440;
     const periodSamples = SAMPLE_RATE / frequencyHz;
-    const sections = boreSections(periodSamples, radiationFromTone(BORE_DEFAULTS.tone));
+    const sections = boreSections(periodSamples);
     const bore = boreFromProfile(transectOf(createFlatTerrain(32, 16_000)), { sections, depth: 2 });
     const response = boreImpulseResponse(bore.coefficients, { sampleRate: SAMPLE_RATE, periodSamples });
     const resonance = firstResonanceHz(response, SAMPLE_RATE);
@@ -666,8 +748,9 @@ describe("terrain bore", () => {
     }
     const quiet = settledRms(0.01);
     const loud = settledRms(0.4);
-    assert.ok(Math.abs(quiet - AGC_TARGET_RMS) < 0.05);
-    assert.ok(Math.abs(loud - AGC_TARGET_RMS) < 0.05);
+    const settled = AGC_TARGET_RMS * AGC_OUTPUT_GAIN;
+    assert.ok(Math.abs(quiet - settled) < 0.05);
+    assert.ok(Math.abs(loud - settled) < 0.05);
   });
 
   it("stays silent and finite when the leveled signal is already silent", () => {
@@ -713,7 +796,7 @@ describe("terrain bore", () => {
     const offset = boreTuningOffsetSemitones(elevationMeters, { depth: 2 });
     const naivePeriodSamples = SAMPLE_RATE / targetHz;
     const tunedPeriodSamples = naivePeriodSamples * 2 ** (offset / 12);
-    const sections = boreSections(tunedPeriodSamples, radiationFromTone(BORE_DEFAULTS.tone));
+    const sections = boreSections(tunedPeriodSamples);
     const bore = boreFromProfile(elevationMeters, { sections, depth: 2 });
     const response = boreImpulseResponse(bore.coefficients, { sampleRate: SAMPLE_RATE, periodSamples: tunedPeriodSamples });
     const resonance = firstResonanceHz(response, SAMPLE_RATE);

@@ -1,15 +1,14 @@
-import { midiNoteFrequency } from "../model/wavetable.js?v=0.4.0";
+import { midiNoteFrequency } from "../model/wavetable.js?v=0.4.1";
 import {
   BORE_DEFAULTS,
   TEMPER_RECOMPUTE_THROTTLE_MS,
   boreFromProfile,
   boreSections,
   boreTuningOffsetSemitones,
-  radiationFromTone,
   reliefIsFlat,
-} from "../model/bore.js?v=0.4.0";
+} from "../model/bore.js?v=0.4.1";
 
-const WORKLET_URL = new URL("./bore-worklet.js?v=0.4.0", import.meta.url);
+const WORKLET_URL = new URL("./bore-worklet.js?v=0.4.1", import.meta.url);
 const VOICE_PEAK = 0.85;
 
 export class BoreInstrument {
@@ -106,7 +105,7 @@ export class BoreInstrument {
   }
 
   ladderForProfile(elevationMeters, periodSamples, offsetSemitones) {
-    const sections = boreSections(periodSamples, radiationFromTone(this.parameters.tone));
+    const sections = boreSections(periodSamples);
     const bore = boreFromProfile(elevationMeters, { sections, depth: this.parameters.depth });
     return {
       coefficients: bore.coefficients,

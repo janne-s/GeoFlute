@@ -1,15 +1,15 @@
-import { downloadBlob, encodeNoteWav, encodeWavetableWav, wavetableWavByteLength, WAVETABLE_FRAME_SAMPLES } from "./audio/wav.js?v=0.4.0";
-import { zipStore } from "./audio/zip.js?v=0.4.0";
-import { WavetableInstrument } from "./audio/wavetable-synth.js?v=0.4.0";
-import { BoreInstrument } from "./audio/bore-synth.js?v=0.4.0";
-import { EXPORT_SUSTAIN_SECONDS, EXPORT_TAIL_SECONDS, renderBoreMultisample } from "./audio/bore-render.js?v=0.4.0";
-import { findPlace } from "./data/place-search.js?v=0.4.0";
-import { loadTerrainGrid } from "./data/terrain-tiles.js?v=0.4.0";
-import { WorldMap } from "./map/world-map.js?v=0.4.0";
-import { multisampleKeyRanges, multisampleNoteList, sfzDocument } from "./model/multisample.js?v=0.4.0";
-import { analysisExtent, areaDimensions, createFoundationTerrain, FOUNDATION_SEED } from "./model/terrain.js?v=0.4.0";
-import { stereoTransectPositions } from "./model/bore.js?v=0.4.0";
-import { createPatch, createReliefProfile, parsePatch } from "./model/patch.js?v=0.4.0";
+import { downloadBlob, encodeNoteWav, encodeWavetableWav, wavetableWavByteLength, WAVETABLE_FRAME_SAMPLES } from "./audio/wav.js?v=0.4.1";
+import { zipStore } from "./audio/zip.js?v=0.4.1";
+import { WavetableInstrument } from "./audio/wavetable-synth.js?v=0.4.1";
+import { BoreInstrument } from "./audio/bore-synth.js?v=0.4.1";
+import { EXPORT_SUSTAIN_SECONDS, EXPORT_TAIL_SECONDS, renderBoreMultisample } from "./audio/bore-render.js?v=0.4.1";
+import { findPlace } from "./data/place-search.js?v=0.4.1";
+import { loadTerrainGrid } from "./data/terrain-tiles.js?v=0.4.1";
+import { WorldMap } from "./map/world-map.js?v=0.4.1";
+import { multisampleKeyRanges, multisampleNoteList, sfzDocument } from "./model/multisample.js?v=0.4.1";
+import { analysisExtent, areaDimensions, createFoundationTerrain, FOUNDATION_SEED } from "./model/terrain.js?v=0.4.1";
+import { stereoTransectPositions } from "./model/bore.js?v=0.4.1";
+import { createPatch, createReliefProfile, parsePatch } from "./model/patch.js?v=0.4.1";
 import {
   buildTerrainWavetable,
   buildWavetableFrames,
@@ -19,8 +19,8 @@ import {
   terrainProfileBank,
   transectProfile,
   transectSeparationMeters,
-} from "./model/wavetable.js?v=0.4.0";
-import { drawTerrain, drawWavetable } from "./visual/canvas.js?v=0.4.0";
+} from "./model/wavetable.js?v=0.4.1";
+import { drawTerrain, drawWavetable } from "./visual/canvas.js?v=0.4.1";
 
 const DEFAULT_SELECTION = {
   west: -61.75,
@@ -147,8 +147,8 @@ root.innerHTML = `
             <input id="bore-depth" type="range" min="0.25" max="3" step="0.05" value="2" />
             <label for="bore-decay">DECAY <output id="bore-decay-value">0.85</output></label>
             <input id="bore-decay" type="range" min="0" max="1" step="0.01" value="0.85" />
-            <label for="bore-tone">TONE <output id="bore-tone-value">0.89</output></label>
-            <input id="bore-tone" type="range" min="0" max="1" step="0.01" value="0.89" />
+            <label for="bore-tone">TONE <output id="bore-tone-value">0.50</output></label>
+            <input id="bore-tone" type="range" min="0" max="1" step="0.01" value="0.5" />
             <label for="bore-blow">BLOW <output id="bore-blow-value">0.50</output></label>
             <input id="bore-blow" type="range" min="0" max="1" step="0.01" value="0.50" />
             <label for="bore-width">WIDTH <output id="bore-width-value">MONO</output></label>

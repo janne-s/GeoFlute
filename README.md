@@ -72,7 +72,7 @@ the same document, so **OPEN** accepts either.
   mountain.
 - **DEPTH** — Scales how strongly the relief shapes the bore's cross-section.
 - **DECAY** — Sets how long the bore rings.
-- **TONE** — Opens or darkens the bore's radiating end.
+- **TONE** — Sets how much the bore's wall absorbs the upper partials.
 - **BLOW** — Sets the strength of the breath exciting the bore.
 - **WIDTH** — Separates the bore into a stereo pair of parallel transects, and
   reads out the ground distance between them. At MONO both channels are one

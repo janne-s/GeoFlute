@@ -1,5 +1,5 @@
-import { analysisExtent } from "../model/terrain.js?v=0.4.0";
-import { clippedTransect } from "../model/wavetable.js?v=0.4.0";
+import { analysisExtent } from "../model/terrain.js?v=0.4.1";
+import { clippedTransect } from "../model/wavetable.js?v=0.4.1";
 
 const TILE_SIZE = 256;
 const MAX_MERCATOR_LAT = 85.05112878;

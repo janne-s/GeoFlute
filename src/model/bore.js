@@ -1,4 +1,4 @@
-import { resampleProfile } from "./wavetable.js?v=0.4.0";
+import { resampleProfile } from "./wavetable.js?v=0.4.1";
 
 export const BORE_REFERENCE_RELIEF_METERS = 1_000;
 export const MINIMUM_BORE_SECTIONS = 4;
@@ -9,11 +9,13 @@ export const LOOP_DELAY_BUFFER_LENGTH = 2_048;
 export const MOUTH_REFLECTION = -0.999;
 export const BREATH_COLOUR = 0.12;
 export const DC_BLOCK_POLE = 0.9975;
+export const RADIATION_COEFFICIENT = 0.9;
+export const MAXIMUM_WALL_DELAY_SAMPLES = 3;
 
 export const BORE_DEFAULTS = {
   depth: 2,
   decay: 0.85,
-  tone: 0.89,
+  tone: 0.5,
   blow: 0.5,
   width: 0,
 };
@@ -26,24 +28,71 @@ export const BORE_RANGES = {
   width: { minimum: 0, maximum: 1 },
 };
 
-const SHORTEST_END_REFLECTION = 0.955;
-const LONGEST_END_REFLECTION = 0.9995;
-const DARKEST_RADIATION = 0.25;
-const BRIGHTEST_RADIATION = 0.98;
 const LOUDEST_JET = 0.08;
+
+const LOSSIEST_ROUND_TRIP_DECIBELS = 1.6;
+const TIGHTEST_ROUND_TRIP_DECIBELS = 0.06;
+const WALL_LOSS_SHARE = 0.75;
+const DARKEST_WALL_TILT_DECIBELS = 40;
+const BRIGHTEST_WALL_TILT_DECIBELS = 5;
 
 function clamp(value, minimum, maximum) {
   return Math.min(maximum, Math.max(minimum, value));
 }
 
-export function endReflectionFromDecay(decay) {
+/**
+ * Total loss a wave meets travelling the bore and back. Spaced geometrically
+ * because decay time is inversely proportional to it, so equal slider steps
+ * multiply the ring rather than crowding every usable length into the top.
+ * @param {number} decay
+ */
+export function roundTripDecibelsFromDecay(decay) {
   const bounded = clamp(decay, 0, 1);
-  return -(SHORTEST_END_REFLECTION + (LONGEST_END_REFLECTION - SHORTEST_END_REFLECTION) * bounded);
+  return LOSSIEST_ROUND_TRIP_DECIBELS
+    * (TIGHTEST_ROUND_TRIP_DECIBELS / LOSSIEST_ROUND_TRIP_DECIBELS) ** bounded;
 }
 
-export function radiationFromTone(tone) {
+/**
+ * The share of the round trip's loss that the wall carries rather than the two
+ * ends. It has to be most of it: the ends cannot damp a mode that terrain
+ * scattering has trapped between two interior junctions, and a trapped mode
+ * outlasting the fundamental is what a listener hears as metal.
+ * @param {number} decay
+ */
+export function wallDecibelsFromDecay(decay) {
+  return WALL_LOSS_SHARE * roundTripDecibelsFromDecay(decay);
+}
+
+export function endReflectionFromDecay(decay) {
+  const endDecibels = (1 - WALL_LOSS_SHARE) * roundTripDecibelsFromDecay(decay);
+  return -(10 ** (-endDecibels / 20));
+}
+
+/**
+ * Extra round-trip wall loss at Nyquist, spaced geometrically because a tilt's
+ * audible range spans more than an order of magnitude in decibels.
+ * @param {number} tone
+ */
+export function wallTiltDecibelsFromTone(tone) {
   const bounded = clamp(tone, 0, 1);
-  return DARKEST_RADIATION + (BRIGHTEST_RADIATION - DARKEST_RADIATION) * bounded;
+  return DARKEST_WALL_TILT_DECIBELS
+    * (BRIGHTEST_WALL_TILT_DECIBELS / DARKEST_WALL_TILT_DECIBELS) ** bounded;
+}
+
+/**
+ * Spreads a round-trip loss and tilt over the `2 * sections` wall filters a
+ * round trip passes through, so both controls mean the same thing at every
+ * played note instead of scaling with the bore's length.
+ * @param {number} wallDecibels
+ * @param {number} tiltDecibels
+ * @param {number} sections
+ */
+export function wallFilterCoefficients(wallDecibels, tiltDecibels, sections) {
+  const passes = 2 * Math.max(1, sections);
+  const gain = 10 ** (-Math.max(0, wallDecibels) / (20 * passes));
+  const nyquistGain = 10 ** (-Math.max(0, tiltDecibels) / (20 * passes));
+  const pole = (2 * nyquistGain) / (1 + nyquistGain);
+  return { gain, pole, feed: gain * pole, keep: 1 - pole };
 }
 
 export function jetFromBlow(blow) {
@@ -77,10 +126,18 @@ export function stereoNoiseMix(width) {
   return { shared: Math.cos(angle), own: Math.sin(angle) };
 }
 
-export function boreSections(periodSamples, radiationCoefficient) {
-  const radiationDelay = (1 - radiationCoefficient) / radiationCoefficient;
-  const ladderTarget = (periodSamples - MINIMUM_LOOP_DELAY_SAMPLES - radiationDelay) / 2;
-  return clamp(Math.floor(ladderTarget), MINIMUM_BORE_SECTIONS, MAXIMUM_BORE_SECTIONS);
+export function wallDelaySamples(pole, sections) {
+  return (2 * sections * (1 - pole)) / pole;
+}
+
+export function boreSections(periodSamples) {
+  const radiationDelay = (1 - RADIATION_COEFFICIENT) / RADIATION_COEFFICIENT;
+  const reserved = MINIMUM_LOOP_DELAY_SAMPLES + radiationDelay + MAXIMUM_WALL_DELAY_SAMPLES;
+  return clamp(
+    Math.floor((periodSamples - reserved) / 2),
+    MINIMUM_BORE_SECTIONS,
+    MAXIMUM_BORE_SECTIONS,
+  );
 }
 
 /**
@@ -129,6 +186,8 @@ export class BoreLadder {
     this.backward = new Float64Array(maximumSections);
     this.nextForward = new Float64Array(maximumSections);
     this.nextBackward = new Float64Array(maximumSections);
+    this.wallForward = new Float64Array(maximumSections);
+    this.wallBackward = new Float64Array(maximumSections);
     this.coefficients = new Float64Array(maximumSections);
     this.delayLine = new Float64Array(LOOP_DELAY_BUFFER_LENGTH);
     this.delayIndex = 0;
@@ -136,10 +195,15 @@ export class BoreLadder {
     this.periodSamples = 0;
     this.loopDelaySamples = MINIMUM_LOOP_DELAY_SAMPLES;
     this.endReflection = endReflectionFromDecay(BORE_DEFAULTS.decay);
-    this.radiationCoefficient = radiationFromTone(BORE_DEFAULTS.tone);
+    this.wallDecibels = wallDecibelsFromDecay(BORE_DEFAULTS.decay);
+    this.wallTiltDecibels = wallTiltDecibelsFromTone(BORE_DEFAULTS.tone);
+    this.wallFeed = 0;
+    this.wallKeep = 0;
+    this.wallPole = 1;
     this.radiationState = 0;
     this.blockerInput = 0;
     this.blockerOutput = 0;
+    this.refreshWall();
   }
 
   setBore(coefficients, periodSamples) {
@@ -149,19 +213,35 @@ export class BoreLadder {
       this.coefficients[index] = clamp(coefficients[index], -MAXIMUM_REFLECTION, MAXIMUM_REFLECTION);
     }
     this.periodSamples = periodSamples;
-    this.refreshLoopDelay();
+    this.refreshWall();
   }
 
-  setLoop(endReflection, radiationCoefficient) {
+  setLoop(endReflection, wallDecibels, wallTiltDecibels) {
     this.endReflection = clamp(endReflection, -MAXIMUM_REFLECTION - 0.04, 0);
-    this.radiationCoefficient = clamp(radiationCoefficient, DARKEST_RADIATION, BRIGHTEST_RADIATION);
+    this.wallDecibels = Math.max(0, wallDecibels);
+    this.wallTiltDecibels = Math.max(0, wallTiltDecibels);
+    this.refreshWall();
+  }
+
+  refreshWall() {
+    const wall = wallFilterCoefficients(
+      this.wallDecibels,
+      this.wallTiltDecibels,
+      Math.max(1, this.sections),
+    );
+    this.wallFeed = wall.feed;
+    this.wallKeep = wall.keep;
+    this.wallPole = wall.pole;
     this.refreshLoopDelay();
   }
 
   refreshLoopDelay() {
-    const radiationDelay = (1 - this.radiationCoefficient) / this.radiationCoefficient;
+    const radiationDelay = (1 - RADIATION_COEFFICIENT) / RADIATION_COEFFICIENT;
     this.loopDelaySamples = clamp(
-      this.periodSamples - 2 * this.sections - radiationDelay,
+      this.periodSamples
+        - 2 * this.sections
+        - radiationDelay
+        - wallDelaySamples(this.wallPole, this.sections),
       MINIMUM_LOOP_DELAY_SAMPLES,
       LOOP_DELAY_BUFFER_LENGTH - 2,
     );
@@ -172,6 +252,8 @@ export class BoreLadder {
     this.backward.fill(0);
     this.nextForward.fill(0);
     this.nextBackward.fill(0);
+    this.wallForward.fill(0);
+    this.wallBackward.fill(0);
     this.delayLine.fill(0);
     this.delayIndex = 0;
     this.radiationState = 0;
@@ -197,12 +279,19 @@ export class BoreLadder {
     this.delayIndex = (this.delayIndex + 1) % LOOP_DELAY_BUFFER_LENGTH;
 
     this.nextForward[0] = input + MOUTH_REFLECTION * delayed;
+    const feed = this.wallFeed;
+    const keep = this.wallKeep;
     for (let index = 0; index < last; index += 1) {
       const scatter = this.coefficients[index] * (this.forward[index] - this.backward[index + 1]);
-      this.nextForward[index + 1] = this.forward[index] + scatter;
-      this.nextBackward[index] = this.backward[index + 1] + scatter;
+      const forwardWall = feed * (this.forward[index] + scatter) + keep * this.wallForward[index];
+      const backwardWall = feed * (this.backward[index + 1] + scatter)
+        + keep * this.wallBackward[index];
+      this.wallForward[index] = forwardWall;
+      this.wallBackward[index] = backwardWall;
+      this.nextForward[index + 1] = forwardWall;
+      this.nextBackward[index] = backwardWall;
     }
-    this.radiationState += this.radiationCoefficient * (this.forward[last] - this.radiationState);
+    this.radiationState += RADIATION_COEFFICIENT * (this.forward[last] - this.radiationState);
     this.nextBackward[last] = this.endReflection * this.radiationState;
 
     const pressure = this.forward[last];
@@ -233,7 +322,8 @@ export class BreathNoise {
   }
 }
 
-export const AGC_TARGET_RMS = 0.28;
+export const AGC_TARGET_RMS = 0.12;
+export const AGC_OUTPUT_GAIN = 2;
 export const AGC_FLOOR_RMS = 0.0004;
 export const AGC_MINIMUM_GAIN = 0.25;
 export const AGC_MAXIMUM_GAIN = 48;
@@ -267,7 +357,7 @@ export class AutoLeveler {
   }
 
   process(sample) {
-    return Math.tanh(sample * this.advance(sample));
+    return AGC_OUTPUT_GAIN * Math.tanh(sample * this.advance(sample));
   }
 }
 
@@ -281,7 +371,8 @@ export function boreImpulseResponse(coefficients, options = {}) {
   const ladder = new BoreLadder();
   ladder.setLoop(
     endReflectionFromDecay(options.decay ?? BORE_DEFAULTS.decay),
-    radiationFromTone(options.tone ?? BORE_DEFAULTS.tone),
+    wallDecibelsFromDecay(options.decay ?? BORE_DEFAULTS.decay),
+    wallTiltDecibelsFromTone(options.tone ?? BORE_DEFAULTS.tone),
   );
   ladder.setBore(coefficients, options.periodSamples ?? 2 * (coefficients.length + 1) + MINIMUM_LOOP_DELAY_SAMPLES);
   const response = new Float64Array(Math.round(seconds * sampleRate));
@@ -340,7 +431,7 @@ export function boreTuningOffsetSemitones(elevationMeters, options = {}) {
   const referenceMidiNote = options.referenceMidiNote ?? TEMPER_REFERENCE_MIDI_NOTE;
   const targetHz = 440 * 2 ** ((referenceMidiNote - 69) / 12);
   const periodSamples = sampleRate / targetHz;
-  const sections = boreSections(periodSamples, radiationFromTone(tone));
+  const sections = boreSections(periodSamples);
   const bore = boreFromProfile(elevationMeters, { sections, depth });
   const seconds = (TEMPER_ANALYSIS_WINDOW_SAMPLES + 256) / sampleRate;
   const response = boreImpulseResponse(bore.coefficients, { sampleRate, seconds, periodSamples, decay, tone });

@@ -1,7 +1,7 @@
-import { midiNoteFrequency } from "../model/wavetable.js?v=0.4.0";
-import { boreFromProfile, boreSections, boreTuningOffsetSemitones, radiationFromTone } from "../model/bore.js?v=0.4.0";
+import { midiNoteFrequency } from "../model/wavetable.js?v=0.4.1";
+import { boreFromProfile, boreSections, boreTuningOffsetSemitones, reliefIsFlat } from "../model/bore.js?v=0.4.1";
 
-const WORKLET_URL = new URL("./bore-worklet.js?v=0.4.0", import.meta.url);
+const WORKLET_URL = new URL("./bore-worklet.js?v=0.4.1", import.meta.url);
 const VOICE_PEAK = 0.85;
 export const EXPORT_SUSTAIN_SECONDS = 2;
 export const EXPORT_TAIL_SECONDS = 1;
@@ -42,7 +42,7 @@ export async function renderBoreMultisample(profiles, midiNotes, parameters, opt
 }
 
 function ladderForProfile(elevationMeters, naivePeriodSamples, parameters, offsetSemitones) {
-  const sections = boreSections(naivePeriodSamples, radiationFromTone(parameters.tone));
+  const sections = boreSections(naivePeriodSamples);
   const bore = boreFromProfile(elevationMeters, { sections, depth: parameters.depth });
   return {
     coefficients: bore.coefficients,
@@ -85,11 +85,15 @@ async function renderNote(profiles, midiNote, parameters, offsets, options) {
   const node = new AudioWorkletNode(context, "bore-voice", {
     numberOfInputs: 0,
     numberOfOutputs: 1,
-    outputChannelCount: [1],
+    outputChannelCount: [channelCount],
     processorOptions: {
-      coefficients: bore.coefficients,
-      periodSamples,
-      excited: true,
+      coefficients: left.coefficients,
+      periodSamples: left.periodSamples,
+      rightCoefficients: right?.coefficients,
+      rightPeriodSamples: right?.periodSamples,
+      width: right ? parameters.width : 0,
+      excited: !reliefIsFlat(profiles.left),
+      rightExcited: !reliefIsFlat(right ? profiles.right : profiles.left),
       seed: (midiNote * 2_654_435_761) >>> 0,
     },
   });
